@@ -1,2 +1,15 @@
+CMakeCache.txt
+CMakeFiles
+CMakeScripts
 CMakeLists.txt.user
-
+Testing
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+install/
+tools/
+*.a
+far2l/bootstrap
+build/

@@ -1,10 +1,12 @@
 #include <set>
 #include <string>
+#include <list>
 #include <locale> 
 #include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <mutex>
+#include <vector>
 #include "WinCompat.h"
 #include "WinPort.h"
 #include "sudo.h"
@@ -108,73 +110,6 @@ void AppendAndRectifyPath(std::string &s, const char *div, LPCWSTR append)
 	}
 }
 
-bool MatchWildcard(const char *string, const char *wild) {
-	// originally written by Jack Handy
-	const char *cp = NULL, *mp = NULL;
-	while ((*string) && (*wild != '*')) {
-		if ((*wild != *string) && (*wild != '?'))
-			return false;
-		
-		wild++;
-		string++;
-	}
-
-	while (*string) {
-		if (*wild == '*') {
-			if (!*++wild)
-				return true;
-			
-			mp = wild;
-			cp = string+1;
-		} else if ((*wild == *string) || (*wild == '?')) {
-			wild++;
-			string++;
-		} else {
-			wild = mp;
-			string = cp++;
-		}
-	}
-
-	while (*wild == '*') wild++;
-	return !*wild;
-}
-
-static inline char EngLower(char c)
-{
-	return (c>='A' && c<='Z') ? c + 'a' - 'A' : c;
-}
-
-bool MatchWildcardICE(const char *string, const char *wild) {
-	// originally written by Jack Handy
-	const char *cp = NULL, *mp = NULL;
-	while ((*string) && (*wild != '*')) {
-		if ((EngLower(*wild) != EngLower(*string)) && (*wild != '?'))
-			return false;
-		
-		wild++;
-		string++;
-	}
-
-	while (*string) {
-		if (*wild == '*') {
-			if (!*++wild)
-				return true;
-			
-			mp = wild;
-			cp = string+1;
-		} else if ((EngLower(*wild) == EngLower(*string)) || (*wild == '?')) {
-			wild++;
-			string++;
-		} else {
-			wild = mp;
-			string = cp++;
-		}
-	}
-
-	while (*wild == '*') wild++;
-	return !*wild;
-}
-
 void WinPortInitWellKnownEnv()
 {
 	if (!getenv("TEMP")) {
@@ -182,6 +117,67 @@ void WinPortInitWellKnownEnv()
 		mkdir(temp.c_str(), 0777);
 		setenv("TEMP", temp.c_str(), 1);
 	}
+
+#ifdef __APPLE__
+	std::list<std::string> pathfiles;
+	pathfiles.emplace_back("/etc/paths");
+	DIR *dir = opendir("/etc/paths.d");
+	std::string str;
+	if (dir) {
+		for (;;) {
+			struct dirent *de = readdir(dir);
+			if (!de) break;
+			if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+				continue;
+
+			str = "/etc/paths.d/";
+			str+= de->d_name;
+			pathfiles.emplace_back(str);
+		}
+		closedir(dir);
+	}
+
+	const char *psz = getenv("PATH");
+	str = psz ? psz : "";
+	bool changed = false;
+	for (const auto &pathfile : pathfiles) {
+		FILE *f = fopen(pathfile.c_str(), "r");
+		if (f) {
+			char line[MAX_PATH + 1] = {};
+			while (fgets(line, sizeof(line) - 1, f)) {
+				char *crlf = strpbrk(line, "\r\n");
+				if (crlf)
+					*crlf = 0;
+
+				size_t l = strlen(line);
+				if (!l)
+					continue;
+
+				bool dup = false;
+				for (size_t p = str.find(line); p != std::string::npos; p = str.find(line, p + l)) {
+					if ( (p == 0 || str[p - 1] == ':') && ( p + l == str.size() || str[p + l] == ':')) {
+						dup = true;
+						break;
+					}
+				}
+
+				if (dup)
+					continue;
+
+				if (!str.empty() && str[str.size() - 1] != ':')
+					str+= ':';
+				str.append(line, l);
+				changed = true;
+			}
+			fclose(f);
+		}
+	}
+
+	if (changed) {
+		fprintf(stderr, "PATH:= '%s'\n", str.c_str());
+		setenv("PATH", str.c_str(), 1);
+	}
+#endif
 }
 
 

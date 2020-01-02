@@ -126,9 +126,10 @@ vtansi.cpp
 PluginA.cpp
 execute_oscmd.cpp
 vtshell_translation.cpp
+VTFar2lExtensios.cpp
 vtlog.cpp
 vtcompletor.cpp
-SharedResource.cpp
+InterThreadCall.cpp
 UCD/CharDistribution.cpp
 UCD/JpCntx.cpp
 UCD/LangBulgarianModel.cpp
@@ -165,9 +166,13 @@ target_include_directories(far2l PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 add_dependencies(far2l bootstrap)
 
+if (${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
+    set(wxWidgets_CONFIG_EXECUTABLE "/usr/local/bin/wxgtk3u-3.0-config")
+endif()
+
 if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
     find_package(wxWidgets REQUIRED net core base)
-    SET (WINPORT "-force_load ../WinPort/libWinPort.a -framework IOKit -framework Carbon -framework Cocoa -framework AudioToolbox -framework System -framework OpenGL" wineguts utils glib-2.0 -L/usr/local/lib ${wxWidgets_LIBRARIES} ${wxWidgets_CXX_FLAGS})
+    SET (WINPORT "-force_load \"${CMAKE_BINARY_DIR}/WinPort/libWinPort.a\" -framework IOKit -framework Carbon -framework Cocoa -framework AudioToolbox -framework System -framework OpenGL" wineguts utils glib-2.0 -L/usr/local/lib ${wxWidgets_LIBRARIES} ${wxWidgets_CXX_FLAGS})
 else()
     SET (WINPORT -Wl,--whole-archive WinPort -Wl,--no-whole-archive)
 endif()
@@ -176,7 +181,15 @@ set_target_properties(far2l
     PROPERTIES
     ENABLE_EXPORTS TRUE)
 
-target_link_libraries(far2l ${WINPORT} dl)
+if (${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
+    target_link_libraries(far2l
+	PRIVATE ${WINPORT}
+	PRIVATE c)
+else()
+    target_link_libraries(far2l
+	PRIVATE ${WINPORT}
+	PRIVATE dl)
+endif()
 
 add_custom_command(TARGET far2l POST_BUILD
    COMMAND rm ${INSTALL_DIR}/far2l_askpass || echo ""
@@ -188,6 +201,8 @@ add_custom_command(TARGET far2l POST_BUILD
 if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
 #TODO
 else()
-    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/DE/icons" DESTINATION "/usr/share" USE_SOURCE_PERMISSIONS FILES_MATCHING PATTERN "*")
-    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/DE/far2l.desktop" DESTINATION "/usr/share/applications")
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/DE/far2l.desktop" "${CMAKE_CURRENT_BINARY_DIR}/DE/far2l.desktop")
+
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/DE/icons" DESTINATION "${CMAKE_INSTALL_PREFIX}/share" USE_SOURCE_PERMISSIONS FILES_MATCHING PATTERN "*")
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/DE/far2l.desktop" DESTINATION "${CMAKE_INSTALL_PREFIX}/share/applications")
 endif()

@@ -26,6 +26,7 @@ private:
     int suggestionRow = 0;
     int suggestionCol = 0;
     State state = DO_PUT;
+    bool isEnabled = false;
 
     EditorInfo previousEditorInfo = {0};
     std::wstring previousEditorInfoLine;
@@ -33,11 +34,15 @@ private:
     void putSuggestion();
 
 public:
-    explicit Editor(int id, PluginStartupInfo& info, FarStandardFunctions& fsf);
+    explicit Editor(int id, PluginStartupInfo& info, FarStandardFunctions& fsf, const std::wstring &autoEnableMasks);
 
     int getId();
     State getState();
     EditorInfo getInfo();
+
+    bool getEnabled();
+    void setEnabled(bool enabled);
+
     EditorGetString getString(int line = -1);
     int getSuggestionLength();
 
@@ -52,6 +57,7 @@ public:
     void on();
     void confirmSuggestion();
     void declineSuggestion();
+
 };
 
 #endif //FAR_EDITOR_H

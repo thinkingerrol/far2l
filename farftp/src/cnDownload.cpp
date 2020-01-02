@@ -362,6 +362,7 @@ write_error:
 
 			break;
 		}
+		default: break; // TYPE_E, TYPE_NONE
 	}
 
 NormExit:
@@ -372,7 +373,7 @@ NormExit:
 	scClose(data_peer,-1);
 
 	if(getreply(FALSE) == RPL_ERROR ||
-	        oldtype && !SetType(oldtype))
+	        (oldtype && !SetType(oldtype)))
 	{
 		lostpeer();
 	}

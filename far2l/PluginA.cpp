@@ -49,6 +49,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //#include "farexcpt.hpp"
 #include "fileedit.hpp"
 #include "RefreshFrameManager.hpp"
+#include "InterThreadCall.hpp"
 #include "plclass.hpp"
 #include "PluginA.hpp"
 #include "registry.hpp"
@@ -94,6 +95,7 @@ static const wchar_t wszReg_DeleteFiles[]=L"DeleteFiles";
 static const wchar_t wszReg_MakeDirectory[]=L"MakeDirectory";
 static const wchar_t wszReg_ProcessHostFile[]=L"ProcessHostFile";
 static const wchar_t wszReg_Configure[]=L"Configure";
+static const wchar_t wszReg_MayExitFAR[]=L"MayExitFAR";
 static const wchar_t wszReg_ExitFAR[]=L"ExitFAR";
 static const wchar_t wszReg_ProcessKey[]=L"ProcessKey";
 static const wchar_t wszReg_ProcessEvent[]=L"ProcessEvent";
@@ -123,6 +125,7 @@ static const char NFMP_DeleteFiles[]="DeleteFiles";
 static const char NFMP_MakeDirectory[]="MakeDirectory";
 static const char NFMP_ProcessHostFile[]="ProcessHostFile";
 static const char NFMP_Configure[]="Configure";
+static const char NFMP_MayExitFAR[]="MayExitFAR";
 static const char NFMP_ExitFAR[]="ExitFAR";
 static const char NFMP_ProcessKey[]="ProcessKey";
 static const char NFMP_ProcessEvent[]="ProcessEvent";
@@ -154,7 +157,9 @@ PluginA::PluginA(PluginManager *owner, const wchar_t *lpwszModuleName):
 	m_strModuleName(lpwszModuleName),
 	m_strCacheName(lpwszModuleName),
 	m_hModule(nullptr),
-	RootKey(nullptr)
+	RootKey(nullptr),
+	pFDPanelItemA(nullptr),
+	pVFDPanelItemA(nullptr)
 	//more initialization here!!!
 {
 	ClearExports();
@@ -353,6 +358,7 @@ bool PluginA::Load()
 	pSetFindList=(PLUGINSETFINDLIST)WINPORT(GetProcAddress)(m_hModule,NFMP_SetFindList);
 	pConfigure=(PLUGINCONFIGURE)WINPORT(GetProcAddress)(m_hModule,NFMP_Configure);
 	pExitFAR=(PLUGINEXITFAR)WINPORT(GetProcAddress)(m_hModule,NFMP_ExitFAR);
+	pMayExitFAR=(PLUGINMAYEXITFAR)WINPORT(GetProcAddress)(m_hModule,NFMP_MayExitFAR);
 	pProcessKey=(PLUGINPROCESSKEY)WINPORT(GetProcAddress)(m_hModule,NFMP_ProcessKey);
 	pProcessEvent=(PLUGINPROCESSEVENT)WINPORT(GetProcAddress)(m_hModule,NFMP_ProcessEvent);
 	pCompare=(PLUGINCOMPARE)WINPORT(GetProcAddress)(m_hModule,NFMP_Compare);
@@ -378,10 +384,21 @@ bool PluginA::Load()
 	return true;
 }
 
+
+static void farDisplayNotificationA(const char *action, const char *object)
+{
+	DisplayNotification(action, object);
+}
+
+static int farDispatchInterThreadCallsA()
+{
+	return DispatchInterThreadCalls();
+}
+
 static void CreatePluginStartupInfoA(PluginA *pPlugin, oldfar::PluginStartupInfo *PSI, oldfar::FarStandardFunctions *FSF)
 {
-	static oldfar::PluginStartupInfo StartupInfo={0};
-	static oldfar::FarStandardFunctions StandardFunctions={0};
+	static oldfar::PluginStartupInfo StartupInfo{};
+	static oldfar::FarStandardFunctions StandardFunctions{};
 
 	// заполняем структуру StandardFunctions один раз!!!
 	if (!StandardFunctions.StructSize)
@@ -425,6 +442,8 @@ static void CreatePluginStartupInfoA(PluginA *pPlugin, oldfar::PluginStartupInfo
 		StandardFunctions.ExpandEnvironmentStr=ExpandEnvironmentStrA;
 		StandardFunctions.Execute = farExecuteA;
 		StandardFunctions.ExecuteLibrary = farExecuteLibraryA;
+		StandardFunctions.DisplayNotification = farDisplayNotificationA;
+		StandardFunctions.DispatchInterThreadCalls = farDispatchInterThreadCallsA;
 	}
 
 	if (!StartupInfo.StructSize)
@@ -773,7 +792,7 @@ int PluginA::ProcessEditorInput(
 		{
 			OemRecord=*D;
 			int r = WINPORT(WideCharToMultiByte)(CP_UTF8, 0,  &D->Event.KeyEvent.uChar.UnicodeChar,
-					1, &OemRecord.Event.KeyEvent.uChar.AsciiChar,1, NULL, NULL);
+					1, &OemRecord.Event.KeyEvent.uChar.AsciiChar,1, nullptr, nullptr);
 			if (r<0) fprintf(stderr, "PluginA::ProcessEditorInput: convert failed\n");
 			//CharToOemBuff(&D->Event.KeyEvent.uChar.UnicodeChar,&OemRecord.Event.KeyEvent.uChar.AsciiChar,1);
 			Ptr=&OemRecord;
@@ -1294,7 +1313,7 @@ void PluginA::GetOpenPluginInfo(
 	{
 		ExecuteStruct es;
 		es.id = EXCEPT_GETOPENPLUGININFO;
-		oldfar::OpenPluginInfo InfoA={0};
+		oldfar::OpenPluginInfo InfoA{};
 		EXECUTE_FUNCTION(pGetOpenPluginInfo(hPlugin, &InfoA), es);
 		ConvertOpenPluginInfo(InfoA,pInfo);
 		(void)es; // supress 'set but not used' warning
@@ -1405,7 +1424,7 @@ bool PluginA::GetPluginInfo(PluginInfo *pi)
 	{
 		ExecuteStruct es;
 		es.id = EXCEPT_GETPLUGININFO;
-		oldfar::PluginInfo InfoA={0};
+		oldfar::PluginInfo InfoA{};
 		EXECUTE_FUNCTION(pGetPluginInfo(&InfoA), es);
 
 		if (!es.bUnloaded)
@@ -1416,6 +1435,20 @@ bool PluginA::GetPluginInfo(PluginInfo *pi)
 	}
 
 	return false;
+}
+
+bool PluginA::MayExitFAR()
+{
+	if (pMayExitFAR && !ProcessException)
+	{
+		ExecuteStruct es;
+		es.id = EXCEPT_MAYEXITFAR;
+		es.bDefaultResult = 1;
+		EXECUTE_FUNCTION_EX(pMayExitFAR(), es);
+		return es.bResult;
+	}
+
+	return true;
 }
 
 void PluginA::ExitFAR()
@@ -1431,31 +1464,32 @@ void PluginA::ExitFAR()
 
 void PluginA::ClearExports()
 {
-	pSetStartupInfo=0;
-	pOpenPlugin=0;
-	pOpenFilePlugin=0;
-	pClosePlugin=0;
-	pGetPluginInfo=0;
-	pGetOpenPluginInfo=0;
-	pGetFindData=0;
-	pFreeFindData=0;
-	pGetVirtualFindData=0;
-	pFreeVirtualFindData=0;
-	pSetDirectory=0;
-	pGetFiles=0;
-	pPutFiles=0;
-	pDeleteFiles=0;
-	pMakeDirectory=0;
-	pProcessHostFile=0;
-	pSetFindList=0;
-	pConfigure=0;
-	pExitFAR=0;
-	pProcessKey=0;
-	pProcessEvent=0;
-	pCompare=0;
-	pProcessEditorInput=0;
-	pProcessEditorEvent=0;
-	pProcessViewerEvent=0;
-	pProcessDialogEvent=0;
-	pMinFarVersion=0;
+	pSetStartupInfo=nullptr;
+	pOpenPlugin=nullptr;
+	pOpenFilePlugin=nullptr;
+	pClosePlugin=nullptr;
+	pGetPluginInfo=nullptr;
+	pGetOpenPluginInfo=nullptr;
+	pGetFindData=nullptr;
+	pFreeFindData=nullptr;
+	pGetVirtualFindData=nullptr;
+	pFreeVirtualFindData=nullptr;
+	pSetDirectory=nullptr;
+	pGetFiles=nullptr;
+	pPutFiles=nullptr;
+	pDeleteFiles=nullptr;
+	pMakeDirectory=nullptr;
+	pProcessHostFile=nullptr;
+	pSetFindList=nullptr;
+	pConfigure=nullptr;
+	pExitFAR=nullptr;
+	pMayExitFAR=nullptr;
+	pProcessKey=nullptr;
+	pProcessEvent=nullptr;
+	pCompare=nullptr;
+	pProcessEditorInput=nullptr;
+	pProcessEditorEvent=nullptr;
+	pProcessViewerEvent=nullptr;
+	pProcessDialogEvent=nullptr;
+	pMinFarVersion=nullptr;
 }

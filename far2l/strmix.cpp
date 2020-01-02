@@ -176,7 +176,7 @@ static FARString escapeSpace(const wchar_t* str) {
 		return "''";
 	FARString result;
 	for (const wchar_t *cur = str; *cur; ++cur) {
-		if (wcschr(Opt.strQuotedSymbols, *cur) != NULL)
+		if (wcschr(Opt.strQuotedSymbols, *cur) != nullptr)
 			result.Append('\\');
 		result.Append(*cur);
 	}
@@ -645,7 +645,7 @@ void UnquoteExternal(FARString &strStr)
 
 #define UNIT_COUNT 7 // byte, kilobyte, megabyte, gigabyte, terabyte, petabyte, exabyte.
 
-static wchar_t UnitStr[UNIT_COUNT][2][MAX_UNITSTR_SIZE]={0};
+static wchar_t UnitStr[UNIT_COUNT][2][MAX_UNITSTR_SIZE]={};
 
 void PrepareUnitStr()
 {
@@ -1118,7 +1118,7 @@ FARString& WINAPI FarFormatText(const wchar_t *SrcText,     // источник
   возвращает указатель на начало слова
 */
 
-const wchar_t * const CalcWordFromString(const wchar_t *Str,int CurPos,int *Start,int *End, const wchar_t *WordDiv0)
+const wchar_t * CalcWordFromString(const wchar_t *Str,int CurPos,int *Start,int *End, const wchar_t *WordDiv0)
 {
 	int StartWPos, EndWPos;
 
@@ -1340,27 +1340,6 @@ FARString ReplaceBrackets(const FARString& SearchStr,const FARString& ReplaceStr
 	return result;
 }
 
-
-int FaultTolerantMultiByteToWideChar( UINT CodePage, LPCSTR lpMultiByteStr, int cbMultiByte, LPWSTR lpWideCharStr, int cchWideChar)
-{
-	if (cbMultiByte == -1)
-		cbMultiByte = strlen(lpMultiByteStr) + 1;
-
-	WINPORT(SetLastError)(0);
-	int r = WINPORT(MultiByteToWideChar)(CodePage, 0, lpMultiByteStr, cbMultiByte, lpWideCharStr, cchWideChar);
-
-	if (CodePage == CP_UTF8 && WINPORT(GetLastError)() == ERROR_NO_UNICODE_TRANSLATION) {
-		std::wstring ws;
-		MB2Wide(lpMultiByteStr, cbMultiByte, ws);
-		if (lpWideCharStr) {
-			if (ws.size() > (size_t)cchWideChar)
-				ws.resize(cchWideChar);
-			memcpy(lpWideCharStr, ws.c_str(), ws.size() * sizeof(wchar_t));
-		}
-		r = ws.size();
-	}
-	return r;
-}
 
 std::string EscapeUnprintable(const std::string &str)
 {

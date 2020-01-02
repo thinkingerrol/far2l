@@ -81,6 +81,8 @@ static long OldCalcTime;
 
 #define SDDATA_SIZE   64*1024
 
+#define PROGRESS_REFRESH_THRESHOLD    1000 // msec
+
 enum {COPY_BUFFER_SIZE  = 0x10000};
 
 enum
@@ -486,9 +488,11 @@ CopyProgress *CP;
 
 static int CmpFullNames(const wchar_t *Src,const wchar_t *Dest)
 {
-	FARString strSrcFullName = Src, strDestFullName = Dest;
+	FARString strSrcFullName, strDestFullName;
 
 	// получим полные пути с учетом символических связей
+    	ConvertNameToFull(Src, strSrcFullName);
+    	ConvertNameToFull(Dest, strDestFullName);
 	DeleteEndSlash(strSrcFullName);
 	DeleteEndSlash(strDestFullName);
 
@@ -610,7 +614,7 @@ ShellCopy::ShellCopy(Panel *SrcPanel,        // исходная панель (�
 {
 	Filter=nullptr;
 	DestList.SetParameters(0,0,ULF_UNIQUE);
-	CopyDlgParam CDP={0};
+	CopyDlgParam CDP{};
 	if (!(CDP.SelCount=SrcPanel->GetSelCount()))
 		return;
 
@@ -636,6 +640,8 @@ ShellCopy::ShellCopy(Panel *SrcPanel,        // исходная панель (�
 	// Размер буфера берется из реестра
 	GetRegKey(L"System", L"CopyBufferSize", CopyBufferSize, 0);
 	CopyBufferSize=AlignPageUp(Max(CopyBufferSize,(int)COPY_BUFFER_SIZE));
+	// Progress bar update threshold
+	GetRegKey(L"System", L"ProgressUpdateThreshold", ProgressUpdateThreshold, PROGRESS_REFRESH_THRESHOLD);
 	CDP.thisClass=this;
 	CDP.AltF10=0;
 	CDP.FolderPresent=false;
@@ -658,27 +664,27 @@ ShellCopy::ShellCopy(Panel *SrcPanel,        // исходная панель (�
 
 	DialogDataEx CopyDlgData[]=
 	{
-		DI_DOUBLEBOX,   3, 1,(SHORT)(DLG_WIDTH-4),(SHORT)(DLG_HEIGHT-2),0,0,MSG(MCopyDlgTitle),
-		DI_TEXT,        5, 2, 0, 2,0,0,MSG(Link?MCMLTargetIN:MCMLTargetTO),
-		DI_EDIT,        5, 3,70, 3,reinterpret_cast<DWORD_PTR>(L"Copy"),DIF_FOCUS|DIF_HISTORY|DIF_EDITEXPAND|DIF_USELASTHISTORY|DIF_EDITPATH,L"",
-		DI_TEXT,        3, 4, 0, 4,0,DIF_SEPARATOR,L"",
-		DI_TEXT,        5, 5, 0, 5,0,0,MSG(MCopyIfFileExist),
-		DI_COMBOBOX,   29, 5,70, 5,0,DIF_DROPDOWNLIST|DIF_LISTNOAMPERSAND|DIF_LISTWRAPMODE,L"",
-		DI_CHECKBOX,    5, 6, 0, 6,0,0,MSG(MCopyAccessMode),
-		DI_CHECKBOX,    5, 7, 0, 7,0,0,MSG(MCopyXAttr),
-		DI_CHECKBOX,    5, 8, 0, 8,0,0,MSG(MCopyMultiActions),
-		DI_CHECKBOX,    5, 9, 0, 9,0,0,MSG(MCopyWriteThrough),
-		DI_TEXT,        3,10, 0,10,0,DIF_SEPARATOR,L"",		
-		DI_CHECKBOX,    5, 11, 0, 11,0, Move ? DIF_DISABLE : 0, MSG(MCopySymLinkContents),
-		DI_CHECKBOX,    5, 12, 0, 12,0,0,MSG(MCopySymLinkContentsOuter),
-		DI_TEXT,        3,13, 0,13,0,DIF_SEPARATOR,L"",
-		DI_CHECKBOX,    5,14, 0,14,UseFilter?BSTATE_CHECKED:BSTATE_UNCHECKED,DIF_AUTOMATION,(wchar_t *)MCopyUseFilter,
-		DI_TEXT,        3,15, 0,15,0,DIF_SEPARATOR,L"",
-		DI_BUTTON,      0,16, 0,16,0,DIF_DEFAULT|DIF_CENTERGROUP,MSG(MCopyDlgCopy),
-		DI_BUTTON,      0,16, 0,16,0,DIF_CENTERGROUP|DIF_BTNNOCLOSE,MSG(MCopyDlgTree),
-		DI_BUTTON,      0,16, 0,16,0,DIF_CENTERGROUP|DIF_BTNNOCLOSE|DIF_AUTOMATION|(UseFilter?0:DIF_DISABLE),MSG(MCopySetFilter),
-		DI_BUTTON,      0,16, 0,16,0,DIF_CENTERGROUP,MSG(MCopyDlgCancel),
-		DI_TEXT,        5, 2, 0, 2,0,DIF_SHOWAMPERSAND,L"",
+		{DI_DOUBLEBOX,   3, 1,(SHORT)(DLG_WIDTH-4),(SHORT)(DLG_HEIGHT-2),{},0,MSG(MCopyDlgTitle)},
+		{DI_TEXT,        5, 2, 0, 2,{},0,MSG(Link?MCMLTargetIN:MCMLTargetTO)},
+		{DI_EDIT,        5, 3,70, 3,{reinterpret_cast<DWORD_PTR>(L"Copy")},DIF_FOCUS|DIF_HISTORY|DIF_EDITEXPAND|DIF_USELASTHISTORY|DIF_EDITPATH,L""},
+		{DI_TEXT,        3, 4, 0, 4,{},DIF_SEPARATOR,L""},
+		{DI_TEXT,        5, 5, 0, 5,{},0,MSG(MCopyIfFileExist)},
+		{DI_COMBOBOX,   29, 5,70, 5,{},DIF_DROPDOWNLIST|DIF_LISTNOAMPERSAND|DIF_LISTWRAPMODE,L""},
+		{DI_CHECKBOX,    5, 6, 0, 6,{},0,MSG(MCopyAccessMode)},
+		{DI_CHECKBOX,    5, 7, 0, 7,{},0,MSG(MCopyXAttr)},
+		{DI_CHECKBOX,    5, 8, 0, 8,{},0,MSG(MCopyMultiActions)},
+		{DI_CHECKBOX,    5, 9, 0, 9,{},0,MSG(MCopyWriteThrough)},
+		{DI_TEXT,        3,10, 0,10,{},DIF_SEPARATOR,L""},
+		{DI_CHECKBOX,    5, 11, 0, 11,{}, Move ? DIF_DISABLE : 0, MSG(MCopySymLinkContents)},
+		{DI_CHECKBOX,    5, 12, 0, 12,{},0,MSG(MCopySymLinkContentsOuter)},
+		{DI_TEXT,        3,13, 0,13,{},DIF_SEPARATOR,L""},
+		{DI_CHECKBOX,    5,14, 0,14,{UseFilter?BSTATE_CHECKED:BSTATE_UNCHECKED},DIF_AUTOMATION,(wchar_t *)MCopyUseFilter},
+		{DI_TEXT,        3,15, 0,15,{},DIF_SEPARATOR,L""},
+		{DI_BUTTON,      0,16, 0,16,{},DIF_DEFAULT|DIF_CENTERGROUP,MSG(MCopyDlgCopy)},
+		{DI_BUTTON,      0,16, 0,16,{},DIF_CENTERGROUP|DIF_BTNNOCLOSE,MSG(MCopyDlgTree)},
+		{DI_BUTTON,      0,16, 0,16,{},DIF_CENTERGROUP|DIF_BTNNOCLOSE|DIF_AUTOMATION|(UseFilter?0:DIF_DISABLE),MSG(MCopySetFilter)},
+		{DI_BUTTON,      0,16, 0,16,{},DIF_CENTERGROUP,MSG(MCopyDlgCancel)},
+		{DI_TEXT,        5, 2, 0, 2,{},DIF_SHOWAMPERSAND,L""}
 	};
 	MakeDialogItemsEx(CopyDlgData,CopyDlg);
 	CopyDlg[ID_SC_MULTITARGET].Selected=Opt.CMOpt.MultiCopy;
@@ -911,7 +917,7 @@ ShellCopy::ShellCopy(Panel *SrcPanel,        // исходная панель (�
 	if (Ask)
 	{
 		FarList ComboList;
-		FarListItem LinkTypeItems[2]={0},CopyModeItems[8]={0};
+		FarListItem LinkTypeItems[2]={},CopyModeItems[8]={};
 
 		if (Link)
 		{
@@ -1155,6 +1161,7 @@ ShellCopy::ShellCopy(Panel *SrcPanel,        // исходная панель (�
 			DestList.Reset();
 			TotalFiles=0;
 			TotalCopySize=TotalCopiedSize=TotalSkippedSize=0;
+			ProgressUpdateTime=0;
 
 			// Запомним время начала
 			if (ShowCopyTime)
@@ -2947,11 +2954,15 @@ int ShellCopy::ShellCopyFile(const wchar_t *SrcName,const FAR_FIND_DATA_EX &SrcD
 					PR_ShellCopyMsg();
 				}
 
-				CP->SetProgressValue(CurCopiedSize,SrcData.nFileSize);
+				if(GetProcessUptimeMSec()-ProgressUpdateTime >= ProgressUpdateThreshold) {
 
-				if (ShowTotalCopySize)
-				{
-					CP->SetTotalProgressValue(TotalCopiedSize,TotalCopySize);
+					CP->SetProgressValue(CurCopiedSize,SrcData.nFileSize);
+
+					if (ShowTotalCopySize)
+					{
+						CP->SetTotalProgressValue(TotalCopiedSize,TotalCopySize);
+					}
+					ProgressUpdateTime=GetProcessUptimeMSec();
 				}
 
 				if (AbortOp)
@@ -3198,15 +3209,19 @@ int ShellCopy::ShellCopyFile(const wchar_t *SrcName,const FAR_FIND_DATA_EX &SrcD
 				if (ShowTotalCopySize)
 					TotalCopiedSize+=BytesWritten;
 
-				CP->SetProgressValue(CurCopiedSize,SrcData.nFileSize);
+				if(GetProcessUptimeMSec()-ProgressUpdateTime >= ProgressUpdateThreshold) {
 
-				if (ShowTotalCopySize)
-				{
-					CP->SetTotalProgressValue(TotalCopiedSize,TotalCopySize);
+					CP->SetProgressValue(CurCopiedSize,SrcData.nFileSize);
+
+					if (ShowTotalCopySize)
+					{
+						CP->SetTotalProgressValue(TotalCopiedSize,TotalCopySize);
+					}
+
+					CP->SetNames(SrcData.strFileName,strDestName);
+
+					ProgressUpdateTime=GetProcessUptimeMSec();
 				}
-
-				CP->SetNames(SrcData.strFileName,strDestName);
-
 				//if (CopySparse)
 				//	Size -= BytesRead;
 			}
@@ -3403,21 +3418,21 @@ int ShellCopy::AskOverwrite(const FAR_FIND_DATA_EX &SrcData,
 	};
 	DialogDataEx WarnCopyDlgData[]=
 	{
-		DI_DOUBLEBOX,3,1,WARN_DLG_WIDTH-4,WARN_DLG_HEIGHT-2,0,0,MSG(MWarning),
-		DI_TEXT,5,2,WARN_DLG_WIDTH-6,2,0,DIF_CENTERTEXT,MSG(MCopyFileExist),
-		DI_EDIT,5,3,WARN_DLG_WIDTH-6,3,0,DIF_READONLY,(wchar_t*)DestName,
-		DI_TEXT,3,4,0,4,0,DIF_SEPARATOR,L"",
-		DI_BUTTON,5,5,WARN_DLG_WIDTH-6,5,0,DIF_BTNNOCLOSE|DIF_NOBRACKETS,L"",
-		DI_BUTTON,5,6,WARN_DLG_WIDTH-6,6,0,DIF_BTNNOCLOSE|DIF_NOBRACKETS,L"",
-		DI_TEXT,3,7,0,7,0,DIF_SEPARATOR,L"",
-		DI_CHECKBOX,5,8,0,8,0,DIF_FOCUS,MSG(MCopyRememberChoice),
-		DI_TEXT,3,9,0,9,0,DIF_SEPARATOR,L"",
+		{DI_DOUBLEBOX,3,1,WARN_DLG_WIDTH-4,WARN_DLG_HEIGHT-2,{},0,MSG(MWarning)},
+		{DI_TEXT,5,2,WARN_DLG_WIDTH-6,2,{},DIF_CENTERTEXT,MSG(MCopyFileExist)},
+		{DI_EDIT,5,3,WARN_DLG_WIDTH-6,3,{},DIF_READONLY,(wchar_t*)DestName},
+		{DI_TEXT,3,4,0,4,{},DIF_SEPARATOR,L""},
+		{DI_BUTTON,5,5,WARN_DLG_WIDTH-6,5,{},DIF_BTNNOCLOSE|DIF_NOBRACKETS,L""},
+		{DI_BUTTON,5,6,WARN_DLG_WIDTH-6,6,{},DIF_BTNNOCLOSE|DIF_NOBRACKETS,L""},
+		{DI_TEXT,3,7,0,7,{},DIF_SEPARATOR,L""},
+		{DI_CHECKBOX,5,8,0,8,{},DIF_FOCUS,MSG(MCopyRememberChoice)},
+		{DI_TEXT,3,9,0,9,{},DIF_SEPARATOR,L""},
 
-		DI_BUTTON,0,10,0,10,0,DIF_DEFAULT|DIF_CENTERGROUP,MSG(MCopyOverwrite),
-		DI_BUTTON,0,10,0,10,0,DIF_CENTERGROUP,MSG(MCopySkipOvr),
-		DI_BUTTON,0,10,0,10,0,DIF_CENTERGROUP,MSG(MCopyRename),
-		DI_BUTTON,0,10,0,10,0,DIF_CENTERGROUP|(AskAppend?0:(DIF_DISABLE|DIF_HIDDEN)),MSG(MCopyAppend),
-		DI_BUTTON,0,10,0,10,0,DIF_CENTERGROUP,MSG(MCopyCancelOvr),
+		{DI_BUTTON,0,10,0,10,{},DIF_DEFAULT|DIF_CENTERGROUP,MSG(MCopyOverwrite)},
+		{DI_BUTTON,0,10,0,10,{},DIF_CENTERGROUP,MSG(MCopySkipOvr)},
+		{DI_BUTTON,0,10,0,10,{},DIF_CENTERGROUP,MSG(MCopyRename)},
+		{DI_BUTTON,0,10,0,10,{},DIF_CENTERGROUP|(AskAppend?0:(DIF_DISABLE|DIF_HIDDEN)),MSG(MCopyAppend)},
+		{DI_BUTTON,0,10,0,10,{},DIF_CENTERGROUP,MSG(MCopyCancelOvr)}
 	};
 	FAR_FIND_DATA_EX DestData;
 	DestData.Clear();

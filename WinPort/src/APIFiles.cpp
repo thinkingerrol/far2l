@@ -7,16 +7,17 @@
 #include <fstream>
 #include <mutex>
 #include <utils.h>
-
-#include <wx/wx.h>
-#include <wx/display.h>
+#include <dirent.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #include "WinCompat.h"
 #include "WinPort.h"
 #include "WinPortHandle.h"
 #include "PathHelpers.h"
 #include "sudo.h"
-#include "os_call.h"
+#include <os_call.hpp>
 
 template <class CHAR_T>
 static DWORD EvaluateAttributesT(uint32_t unix_mode, const CHAR_T *name)
@@ -164,9 +165,14 @@ extern "C"
 
 #ifndef __linux__
 		if ((dwFlagsAndAttributes & (FILE_FLAG_WRITE_THROUGH|FILE_FLAG_NO_BUFFERING)) != 0) {
+#ifdef __FreeBSD__
+			fcntl(r, O_DIRECT, 1);
+#elif !defined(__CYGWIN__)
 			fcntl(r, F_NOCACHE, 1);
+#endif // __FreeBSD__
 		}
-#endif
+#endif // __linux__
+
 		/*nobody cares.. if ((dwFlagsAndAttributes&FILE_FLAG_BACKUP_SEMANTICS)==0) {
 			struct stat s = { };
 			sdc_fstat(r, &s);
@@ -234,7 +240,7 @@ extern "C"
 			return FALSE;
 		lpFileSize->QuadPart = len;
 #else
-		struct stat s = {0};
+		struct stat s{};
 		if (os_call_int(sdc_fstat, wph->fd,  &s) == -1)
 			return FALSE;
 		lpFileSize->QuadPart = s.st_size;
@@ -244,7 +250,7 @@ extern "C"
 
 	DWORD WINPORT(GetFileSize)( HANDLE  hFile, LPDWORD lpFileSizeHigh)
 	{
-		LARGE_INTEGER sz64 = {0};
+		LARGE_INTEGER sz64{};
 		if (!WINPORT(GetFileSizeEx)(hFile, &sz64)) {
 			if (lpFileSizeHigh) *lpFileSizeHigh = 0;
 			return INVALID_FILE_SIZE;
@@ -270,8 +276,10 @@ extern "C"
 			if (!remain) break;
 			ssize_t r = os_call_v<ssize_t, -1>(sdc_read, wph->fd, lpBuffer, (size_t)remain);
 			if (r < 0) {
-				if (done==0)
+				if (done==0) {
+					WINPORT(TranslateErrno)();
 					return FALSE;
+				}
 				break;
 			}
 			if (!r) break;
@@ -301,8 +309,10 @@ extern "C"
 		}
 
 		ssize_t r = os_call_v<ssize_t, -1>(sdc_write, wph->fd, lpBuffer, (size_t)nNumberOfBytesToWrite);
-		if (r < 0)
+		if (r < 0) {
+			WINPORT(TranslateErrno)();
 			return FALSE;
+		}
 
 		if (lpNumberOfBytesWritten) 
 			*lpNumberOfBytesWritten = r;
@@ -334,7 +344,7 @@ extern "C"
 
 	DWORD WINPORT(SetFilePointer)( HANDLE hFile, LONG lDistanceToMove, PLONG  lpDistanceToMoveHigh, DWORD  dwMoveMethod)
 	{
-		LARGE_INTEGER liDistanceToMove, liNewFilePointer = {0};
+		LARGE_INTEGER liDistanceToMove, liNewFilePointer = {};
 		if (lpDistanceToMoveHigh) {
 			liDistanceToMove.LowPart = lDistanceToMove;
 			liDistanceToMove.HighPart = lpDistanceToMoveHigh ? *lpDistanceToMoveHigh : 0;			
@@ -358,7 +368,7 @@ extern "C"
 		if (!wph) {
 			return FALSE;
 		}
-		struct stat s = {0};
+		struct stat s{};
 		if (os_call_int(sdc_fstat, wph->fd, &s) < 0)
 			return FALSE;
 			
@@ -376,7 +386,7 @@ extern "C"
 			return FALSE;
 		}
 
-		struct timespec ts[2] = {0};
+		struct timespec ts[2] = {};
 		if (lpLastAccessTime) {
 			WINPORT(FileTime_Win32ToUnix)(lpLastAccessTime, &ts[0]);
 		}
@@ -408,7 +418,7 @@ extern "C"
 		}
 		
 		if ((s.st_mode & S_IFMT) == S_IFLNK) {
-			struct stat sdst = {0};
+			struct stat sdst{};
 			if (os_call_int(sdc_stat, path, &sdst) == 0) {
 				s = sdst;
 				symattr = FILE_ATTRIBUTE_REPARSE_POINT;
@@ -427,7 +437,7 @@ extern "C"
 
 	DWORD WINPORT(GetFileAttributes)(LPCWSTR lpFileName)
 	{
-		struct stat s = { };
+		struct stat s{};
 		const std::string &path = ConsumeWinPath(lpFileName);
 		
 		DWORD symattr = 0;
@@ -538,7 +548,7 @@ extern "C"
 #ifdef _WIN32
 			_h = INVALID_HANDLE_VALUE;
 #else
-			_d = NULL;
+			_d = nullptr;
 #endif
 		}
 		UnixFindFile(const std::string &root, const std::string &mask, DWORD flags) : _flags(flags)
@@ -855,7 +865,7 @@ extern "C"
 			do
 			{
 				swprintf( p, MAX_PATH - 1 - (p - buffer), formatW, unique );
-				handle = WINPORT(CreateFile)( buffer, GENERIC_WRITE, 0, NULL,
+				handle = WINPORT(CreateFile)( buffer, GENERIC_WRITE, 0, nullptr,
 					CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0 );
 				if (handle != INVALID_HANDLE_VALUE)
 				{  /* We created it */

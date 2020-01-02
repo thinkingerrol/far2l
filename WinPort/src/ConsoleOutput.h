@@ -4,22 +4,7 @@
 #include <string>
 #include "WinCompat.h"
 #include "ConsoleBuffer.h"
-
-class ConsoleOutputListener
-{
-	public:
-		virtual void OnConsoleOutputUpdated(const SMALL_RECT &area) = 0;
-		virtual void OnConsoleOutputResized() = 0;
-		virtual void OnConsoleOutputTitleChanged() = 0;
-		virtual void OnConsoleOutputWindowMoved(bool absolute, COORD pos) = 0;
-		virtual COORD OnConsoleGetLargestWindowSize() = 0;
-		virtual void OnConsoleAdhocQuickEdit() = 0;
-		virtual DWORD OnConsoleSetTweaks(DWORD tweaks) = 0;
-		virtual void OnConsoleChangeFont() = 0;
-		virtual void OnConsoleSetMaximized(bool maximized) = 0;
-		virtual void OnConsoleExit() = 0;
-		virtual bool OnConsoleIsActive() = 0;
-};
+#include "Backend.h"
 
 class ConsoleOutput
 {
@@ -27,7 +12,7 @@ class ConsoleOutput
 	ConsoleBuffer _buf;
 	std::vector<CHAR_INFO> _temp_chars;
 	std::wstring _title;
-	ConsoleOutputListener *_listener;
+	IConsoleOutputBackend *_backend;
 	DWORD _mode;	
 	USHORT _attributes;
 	
@@ -55,7 +40,6 @@ class ConsoleOutput
 			SM_FILL_ATTR
 		} kind;
 		size_t count;
-		SMALL_RECT area;
 		union {
 			const WCHAR *str;
 			TCHAR chr;
@@ -63,13 +47,13 @@ class ConsoleOutput
 		};
 	};
 	
-	void ModifySequenceEntityAt(SequenceModifier &sm, COORD pos);
+	bool ModifySequenceEntityAt(SequenceModifier &sm, COORD pos);
 	size_t ModifySequenceAt(SequenceModifier &sm, COORD &pos);
 	void ScrollOutputOnOverflow(SMALL_RECT &area);
 	
 public:
 	ConsoleOutput();
-	void SetListener(ConsoleOutputListener *listener);
+	void SetBackend(IConsoleOutputBackend *listener);
 
 	void SetAttributes(USHORT attributes);
 	USHORT GetAttributes();
@@ -112,6 +96,7 @@ public:
 	DWORD SetConsoleTweaks(DWORD tweaks);
 	void ConsoleChangeFont();
 	bool IsActive();
+	void ConsoleDisplayNotification(const WCHAR *title, const WCHAR *text);
 };
 
 

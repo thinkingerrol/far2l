@@ -1806,7 +1806,7 @@ void TreeList::ReadCache(const wchar_t *TreeRoot)
 		}
 
 	TreeCache.strTreeName = strTreeName;
-	wchar_t *DirName=new wchar_t[NT_MAX_PATH];
+	wchar_t *DirName=new(std::nothrow) wchar_t[NT_MAX_PATH];
 
 	if (DirName)
 	{
@@ -2203,7 +2203,7 @@ bool TreeList::SaveState()
 
 	if (TreeCount > 0)
 	{
-		SaveListData= new TreeItem[TreeCount];
+		SaveListData = new(std::nothrow) TreeItem[TreeCount];
 
 		if (SaveListData)
 		{

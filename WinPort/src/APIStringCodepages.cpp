@@ -6,8 +6,9 @@
 #include <fstream>
 #include <mutex>
 
-#include <wx/wx.h>
-#include <wx/display.h>
+#if !defined(__APPLE__) && !defined(__FreeBSD__)
+# include <alloca.h>
+#endif
 
 #include "WinCompat.h"
 #include "WinPort.h"

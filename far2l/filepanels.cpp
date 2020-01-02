@@ -56,11 +56,11 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "interf.hpp"
 
 FilePanels::FilePanels():
-	LastLeftFilePanel(0),
-	LastRightFilePanel(0),
+	LastLeftFilePanel(nullptr),
+	LastRightFilePanel(nullptr),
 	LeftPanel(CreatePanel(Opt.LeftPanel.Type)),
 	RightPanel(CreatePanel(Opt.RightPanel.Type)),
-	ActivePanel(0),
+	ActivePanel(nullptr),
 	LastLeftType(0),
 	LastRightType(0),
 	LeftStateBeforeHide(0),
@@ -84,17 +84,7 @@ static void PrepareOptFolder(FARString &strSrc, int IsLocalPath_FarPath)
 		apiExpandEnvironmentStrings(strSrc, strSrc);
 	}
 
-	if (!StrCmp(strSrc,L"/"))
-	{
-		strSrc = g_strFarPath;
-
-		if (IsLocalPath_FarPath)
-		{
-			strSrc.SetLength(2);
-			strSrc += L"/";
-		}
-	}
-	else
+	if (strSrc != L"/")
 	{
 		CheckShortcutFolder(&strSrc,FALSE,TRUE);
 	}
@@ -854,7 +844,7 @@ Panel* FilePanels::ChangePanel(Panel *Current,int NewType,int CreateNew,int Forc
 	OldSelectedFirst=Current->GetSelectedFirstMode();
 	OldDirectoriesFirst=Current->GetPrevDirectoriesFirst();
 	LeftPosition=(Current==LeftPanel);
-	Panel *(&LastFilePanel)=LeftPosition ? LastLeftFilePanel:LastRightFilePanel;
+	Panel* &LastFilePanel=LeftPosition ? LastLeftFilePanel:LastRightFilePanel;
 	Current->GetPosition(X1,Y1,X2,Y2);
 	ChangePosition=((OldType==FILE_PANEL && NewType!=FILE_PANEL &&
 	                 OldFullScreen) || (NewType==FILE_PANEL &&

@@ -8,31 +8,63 @@
 #include <mutex>
 #include <stdlib.h>
 
+#if !GLIB_CHECK_VERSION(2,40,0)
+static gboolean g_key_file_save_to_file_xxx(GKeyFile     *key_file, const gchar  *filename, GError      **error)
+{
+  gchar *contents;
+  gboolean success;
+  gsize length;
+
+  g_return_val_if_fail (key_file != NULL, FALSE);
+  g_return_val_if_fail (filename != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  contents = g_key_file_to_data (key_file, &length, NULL);
+  g_assert (contents != NULL);
+
+  success = g_file_set_contents (filename, contents, length, error);
+  g_free (contents);
+
+  return success;
+}
+# define g_key_file_save_to_file g_key_file_save_to_file_xxx
+#endif
+
 static std::mutex g_key_file_helper_mutex;
 
 KeyFileHelper::KeyFileHelper(const char *filename, bool load)
-	: _kf(g_key_file_new()),  _filename(filename), _dirty(!load)
+	: _kf(g_key_file_new()),  _filename(filename), _dirty(!load), _loaded(false)
 {
 	GError *err = NULL;
-	g_key_file_helper_mutex.lock();
-	if (!g_key_file_load_from_file(_kf, _filename.c_str(), G_KEY_FILE_NONE, &err)) {
-		//fprintf(stderr, "KeyFileHelper(%s, %d) err=%p\n", _filename.c_str(), load, err);
+	if (load) {
+		g_key_file_helper_mutex.lock();
+		if (!g_key_file_load_from_file(_kf, _filename.c_str(), G_KEY_FILE_NONE, &err)) {
+			//fprintf(stderr, "KeyFileHelper(%s, %d) err=%p\n", _filename.c_str(), load, err);
+		} else {
+			_loaded = true;
+		}
+		g_key_file_helper_mutex.unlock();
 	}
-	g_key_file_helper_mutex.unlock();
-	
 }
 
 KeyFileHelper::~KeyFileHelper()
 {
 	if (_dirty) {
-		GError *err = NULL;
-		g_key_file_helper_mutex.lock();
-		if (!g_key_file_save_to_file(_kf, _filename.c_str(), &err)) {
-			//fprintf(stderr, "~KeyFileHelper(%s) err=%p\n", _filename.c_str(),  err);
-		}
-		g_key_file_helper_mutex.unlock();
+		Save();
 	}
 	g_key_file_free(_kf);
+}
+
+bool KeyFileHelper::Save()
+{
+	GError *err = NULL;
+	g_key_file_helper_mutex.lock();
+	bool out = !!g_key_file_save_to_file(_kf, _filename.c_str(), &err);
+	g_key_file_helper_mutex.unlock();
+	if (out) {
+		_dirty = false;
+	}
+	return out;
 }
 
 std::vector<std::string> KeyFileHelper::EnumSections()
@@ -47,6 +79,18 @@ std::vector<std::string> KeyFileHelper::EnumSections()
 	}
 	
 	return out;
+}
+
+void KeyFileHelper::RemoveSection(const char *section)
+{
+	_dirty = true;
+	g_key_file_remove_group(_kf, section, NULL);
+}
+
+void KeyFileHelper::RemoveKey(const char *section, const char *name)
+{
+	_dirty = true;
+	g_key_file_remove_key(_kf, section, name, NULL);
 }
 
 std::vector<std::string> KeyFileHelper::EnumKeys(const char *section)

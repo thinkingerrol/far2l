@@ -571,14 +571,26 @@ DWORD GetInputRecord(INPUT_RECORD *rec,bool ExcludeMacro,bool ProcessMouse,bool 
 {
 	_KEYMACRO(CleverSysLog Clev(L"GetInputRecord()"));
 	static int LastEventIdle=FALSE;
-	DWORD ReadCount;
 	DWORD LoopCount=0,CalcKey;
 	DWORD ReadKey=0;
 	int NotMacros=FALSE;
 	static int LastMsClickMacroKey=0;
+	static clock_t sLastIdleDelivered = 0;
 
 	if (AllowSynchro)
 		PluginSynchroManager.Process();
+
+	if (FrameManager->RegularIdleWantersCount())
+	{
+		clock_t now = GetProcessUptimeMSec();
+		if (now - sLastIdleDelivered >= 1000) {
+			LastEventIdle=TRUE;
+			memset(rec,0,sizeof(*rec));
+			rec->EventType=KEY_EVENT;
+			sLastIdleDelivered=now;
+			return KEY_IDLE;
+		}
+	}
 
 	if (!ExcludeMacro && CtrlObject && CtrlObject->Cp())
 	{
@@ -698,18 +710,15 @@ DWORD GetInputRecord(INPUT_RECORD *rec,bool ExcludeMacro,bool ProcessMouse,bool 
 			ReloadEnvironment();
 		}*/
 
-		Console.PeekInput(*rec, 1, ReadCount);
-
 		/* $ 26.04.2001 VVM
 		   ! Убрал подмену колесика */
-		if (ReadCount)
+		if (Console.PeekInput(*rec))
 		{
 			//cheat for flock
 			if (rec->EventType==KEY_EVENT && !rec->Event.KeyEvent.wVirtualScanCode && (rec->Event.KeyEvent.wVirtualKeyCode==VK_NUMLOCK||rec->Event.KeyEvent.wVirtualKeyCode==VK_CAPITAL||rec->Event.KeyEvent.wVirtualKeyCode==VK_SCROLL))
 			{
 				INPUT_RECORD pinp;
-				DWORD nread;
-				Console.ReadInput(pinp, 1, nread);
+				Console.ReadInput(pinp);
 				continue;
 			}
 
@@ -855,6 +864,7 @@ DWORD GetInputRecord(INPUT_RECORD *rec,bool ExcludeMacro,bool ProcessMouse,bool 
 				LastEventIdle=TRUE;
 				memset(rec,0,sizeof(*rec));
 				rec->EventType=KEY_EVENT;
+				sLastIdleDelivered=GetProcessUptimeMSec();
 				return(KEY_IDLE);
 			}
 		}
@@ -868,6 +878,13 @@ DWORD GetInputRecord(INPUT_RECORD *rec,bool ExcludeMacro,bool ProcessMouse,bool 
 		LoopCount++;
 	} // while (1)
 
+	if (rec->EventType==NOOP_EVENT) {
+		Console.ReadInput(*rec);
+		memset(rec,0,sizeof(*rec));
+		rec->EventType=KEY_EVENT;
+		return KEY_NONE;
+	}
+
 	clock_t CurClock=GetProcessUptimeMSec();
 
 	if (rec->EventType==FOCUS_EVENT)
@@ -880,7 +897,7 @@ DWORD GetInputRecord(INPUT_RECORD *rec,bool ExcludeMacro,bool ProcessMouse,bool 
 		MouseButtonState=0;
 		ShiftState=FALSE;
 		PressedLastTime=0;
-		Console.ReadInput(*rec, 1, ReadCount);
+		Console.ReadInput(*rec);
 		CalcKey=rec->Event.FocusEvent.bSetFocus?KEY_GOTFOCUS:KEY_KILLFOCUS;
 		memset(rec,0,sizeof(*rec));
 		rec->EventType=KEY_EVENT;
@@ -914,8 +931,7 @@ DWORD GetInputRecord(INPUT_RECORD *rec,bool ExcludeMacro,bool ProcessMouse,bool 
 		        else // Здесь удалим из очереди... этот самый кривой шифт
 		        {
 		          INPUT_RECORD pinp;
-		          DWORD nread;
-		          Console.ReadInput((Console.GetInputHandle(), &pinp, 1, &nread);
+		          Console.ReadInput(&pinp);
 		          return KEY_NONE;
 		        }
 		      }
@@ -948,9 +964,8 @@ DWORD GetInputRecord(INPUT_RECORD *rec,bool ExcludeMacro,bool ProcessMouse,bool 
 				if (PrevVKKeyCode2 != VK_SHIFT)
 				{
 					INPUT_RECORD pinp;
-					DWORD nread;
 					// Удалим из очереди...
-					Console.ReadInput(pinp, 1, nread);
+					Console.ReadInput(pinp);
 					return KEY_NONE;
 				}
 			}
@@ -1012,7 +1027,7 @@ DWORD GetInputRecord(INPUT_RECORD *rec,bool ExcludeMacro,bool ProcessMouse,bool 
 		return(CalcKey);
 	}
 
-	Console.ReadInput(*rec, 1, ReadCount);
+	Console.ReadInput(*rec);
 
 	if (EnableShowTime)
 		ShowTime(1);
@@ -1099,7 +1114,7 @@ DWORD GetInputRecord(INPUT_RECORD *rec,bool ExcludeMacro,bool ProcessMouse,bool 
 		        (KeyCode==VK_SHIFT || KeyCode==VK_CONTROL || KeyCode==VK_MENU) &&
 		        CurClock-PressedLastTime<500)
 		{
-			int Key=-1;
+			uint32_t Key {std::numeric_limits<uint32_t>::max()};
 
 			if (ShiftPressedLast && KeyCode==VK_SHIFT)
 			{
@@ -1149,14 +1164,14 @@ DWORD GetInputRecord(INPUT_RECORD *rec,bool ExcludeMacro,bool ProcessMouse,bool 
 				{
 					FrameManager->SetLastInputRecord(rec);
 				}
-				if (Key!=-1 && !NotMacros && CtrlObject && CtrlObject->Macro.ProcessKey(Key))
+				if (Key!=std::numeric_limits<uint32_t>::max() && !NotMacros && CtrlObject && CtrlObject->Macro.ProcessKey(Key))
 				{
 					rec->EventType=0;
 					Key=KEY_NONE;
 				}
 			}
 
-			if (Key!=-1)
+			if (Key!=std::numeric_limits<uint32_t>::max())
 				return(Key);
 		}
 
@@ -1414,27 +1429,26 @@ DWORD GetInputRecord(INPUT_RECORD *rec,bool ExcludeMacro,bool ProcessMouse,bool 
 
 DWORD PeekInputRecord(INPUT_RECORD *rec,bool ExcludeMacro)
 {
-	DWORD ReadCount;
 	DWORD Key;
 	ScrBuf.Flush();
 
 	if (KeyQueue && (Key=KeyQueue->Peek()) )
 	{
 		int VirtKey,ControlState;
-		ReadCount=TranslateKeyToVK(Key,VirtKey,ControlState,rec)?1:0;
+		if (!TranslateKeyToVK(Key,VirtKey,ControlState,rec))
+			return 0;
 	}
 	else if ((!ExcludeMacro) && (Key=CtrlObject->Macro.PeekKey()) )
 	{
 		int VirtKey,ControlState;
-		ReadCount=TranslateKeyToVK(Key,VirtKey,ControlState,rec)?1:0;
+		if (!TranslateKeyToVK(Key,VirtKey,ControlState,rec))
+			return 0;
 	}
 	else
 	{
-		Console.PeekInput(*rec, 1, ReadCount);
+		if (!Console.PeekInput(*rec))
+			return 0;
 	}
-
-	if (!ReadCount)
-		return 0;
 
 	return(CalcKeyCode(rec,TRUE));
 }
@@ -1467,7 +1481,7 @@ DWORD WaitKey(DWORD KeyWait,DWORD delayMS,bool ExcludeMacro)
 			Key=GetInputRecord(&rec,ExcludeMacro,true);
 		}
 
-		if (KeyWait == (DWORD)-1)
+		if (KeyWait == KEY_INVALID)
 		{
 			if ((Key&(~KEY_CTRLMASK)) < KEY_END_FKEY || IS_INTERNAL_KEY_REAL(Key&(~KEY_CTRLMASK)))
 				break;
@@ -1640,7 +1654,7 @@ static FARString &GetShiftKeyName(FARString &strName, DWORD Key,int& Len)
 
 /* $ 24.09.2000 SVS
  + Функция KeyNameToKey - получение кода клавиши по имени
-   Если имя не верно или нет такого - возвращается -1
+   Если имя не верно или нет такого - возвращается 0xFFFFFFFF
    Может и криво, но правильно и коротко!
 
    Функция KeyNameToKey ждет строку по вот такой спецификации:
@@ -1652,23 +1666,23 @@ static FARString &GetShiftKeyName(FARString &strName, DWORD Key,int& Len)
    5. "Oem" и 5 десятичных цифр (с ведущими нулями)
    6. только модификаторы (Alt/RAlt/Ctrl/RCtrl/Shift)
 */
-int WINAPI KeyNameToKey(const wchar_t *Name)
+uint32_t WINAPI KeyNameToKey(const wchar_t *Name)
 {
 	if (!Name || !*Name)
-		return -1;
+		return KEY_INVALID;
 
-	DWORD Key=0;
+	uint32_t Key=0;
     // _SVS(SysLog(L"KeyNameToKey('%ls')",Name));
 
 	// Это макроклавиша?
 	if (Name[0] == L'$' && Name[1])
-		return -1;// KeyNameMacroToKey(Name);
+		return KEY_INVALID; // KeyNameMacroToKey(Name);
 
 	if (Name[0] == L'%' && Name[1])
-		return -1;
+		return KEY_INVALID;
 
 	if (Name[1] && wcspbrk(Name,L"()")) // если не один символ и встречаются '(' или ')', то это явно не клавиша!
-		return -1;
+		return KEY_INVALID;
 
 //   if((Key=KeyNameMacroToKey(Name)) != (DWORD)-1)
 //     return Key;
@@ -1741,7 +1755,7 @@ int WINAPI KeyNameToKey(const wchar_t *Name)
 			else if (Key == KEY_ALT || Key == KEY_RALT || Key == KEY_M_SPEC || Key == KEY_M_OEM) // Варианты (3), (4) и (5)
 			{
 				wchar_t *endptr=nullptr;
-				int K=(int)wcstol(Ptr, &endptr, 10);
+				uint32_t K=static_cast<uint32_t>(wcstoul(Ptr, &endptr, 10));
 
 				if (Ptr+5 == endptr)
 				{
@@ -1767,15 +1781,15 @@ int WINAPI KeyNameToKey(const wchar_t *Name)
 	}
 	*/
 	// _SVS(SysLog(L"Key=0x%08X (%c) => '%ls'",Key,(Key?Key:' '),Name));
-	return (!Key || Pos < Len)? -1: (int)Key;
+	return (!Key || Pos < Len)? KEY_INVALID : Key;
 }
 
-BOOL WINAPI KeyToText(int Key0, FARString &strKeyText0)
+BOOL WINAPI KeyToText(uint32_t Key0, FARString &strKeyText0)
 {
 	FARString strKeyText;
 	FARString strKeyTemp;
 	int I, Len;
-	DWORD Key=(DWORD)Key0, FKey=(DWORD)Key0&0xFFFFFF;
+	DWORD Key=Key0, FKey=Key0&0xFFFFFF;
 	//if(Key >= KEY_MACRO_BASE && Key <= KEY_MACRO_ENDBASE)
 	//  return KeyMacroToText(Key0, strKeyText0);
 
@@ -2048,8 +2062,7 @@ DWORD CalcKeyCode(INPUT_RECORD *rec,int RealKey,int *NotMacros)
 		{
 			//FlushInputBuffer();//???
 			INPUT_RECORD TempRec;
-			DWORD ReadCount;
-			Console.ReadInput(TempRec, 1, ReadCount);
+			Console.ReadInput(TempRec);
 			ReturnAltValue=TRUE;
 			//_SVS(SysLog(L"0 AltNumPad -> AltValue=0x%0X CtrlState=%X",AltValue,CtrlState));
 			AltValue&=0xFFFF;

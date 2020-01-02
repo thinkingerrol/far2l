@@ -11,10 +11,14 @@ private:
     static constexpr const wchar_t *PLUGIN_REGISTRY_BRANCH = L"/editorcomp";
     static constexpr const wchar_t *ENABLED_REGISTRY_ENTRY = L"Enabled";
 
+    static constexpr const wchar_t *FILE_MASKS_ENTRY = L"fileMasks";
+    static constexpr const wchar_t *DEFAULT_FILE_MASKS = L"*.c;*.cpp;*.cxx;*.h;*.s;*.asm;*.pl;*.py;*.js;*.json;*.sh";
+
     PluginStartupInfo info;
     FarStandardFunctions fsf;
-    std::wstring registryRootKey;
-    bool enabled;
+    std::wstring registryRootKey, fileMasks;
+    const std::wstring emptyString;
+    bool autoEnabling;
 
     std::map<int, Editor *> editors;
 
@@ -25,9 +29,12 @@ public:
 
     PluginStartupInfo &getInfo();
 
-    void setEnabled(bool enabled);
+    void setAutoEnabling(bool enabled);
+    bool getAutoEnabling();
 
-    bool getEnabled();
+    void setFileMasks(const std::wstring &masks);
+    const std::wstring &getFileMasks();
+
 
     void remove(Editor *&editor);
 };

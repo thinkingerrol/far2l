@@ -57,6 +57,8 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "message.hpp"
 #include "strmix.hpp"
 #include "history.hpp"
+#include "InterThreadCall.hpp"
+#include <cwctype>
 
 #define VTEXT_ADN_SEPARATORS	1
 
@@ -119,44 +121,44 @@ bool IsKeyHighlighted(const wchar_t *Str,int Key,int Translate,int AmpPos)
 	if (AmpPos == -1)
 	{
 		if (!(Str=wcschr(Str,L'&')))
-			return FALSE;
+			return false;
 
 		AmpPos=1;
 	}
 	else
 	{
 		if (AmpPos >= StrLength(Str))
-			return FALSE;
+			return false;
 
-		Str=Str+AmpPos;
+		Str+=AmpPos;
 		AmpPos=0;
 
 		if (Str[AmpPos] == L'&')
 			AmpPos++;
 	}
 
-	int UpperStrKey=Upper((int)Str[AmpPos]);
+	int UpperStrKey=Upper(Str[AmpPos]);
 
 	if (Key < 0xFFFF)
 	{
-		return UpperStrKey == (int)Upper(Key) || (Translate && KeyToKeyLayoutCompare(Key,UpperStrKey));
+		return UpperStrKey == Upper(Key) || (Translate && KeyToKeyLayoutCompare(Key,UpperStrKey));
 	}
 
 	if (Key&KEY_ALT)
 	{
-		int AltKey=Key&(~KEY_ALT);
+		uint32_t AltKey=Key&(~KEY_ALT);
 
 		if (AltKey < 0xFFFF)
 		{
-			if ((unsigned int)AltKey >= L'0' && (unsigned int)AltKey <= L'9')
-				return(AltKey==UpperStrKey);
+			if ( iswdigit(AltKey) != 0 )
+				return(AltKey==(uint32_t)UpperStrKey);
 
-			if ((unsigned int)AltKey > L' ' && AltKey <= 0xFFFF)
+			if (AltKey > L' ')
 				//         (AltKey=='-'  || AltKey=='/' || AltKey==','  || AltKey=='.' ||
 				//          AltKey=='\\' || AltKey=='=' || AltKey=='['  || AltKey==']' ||
 				//          AltKey==':'  || AltKey=='"' || AltKey=='~'))
 			{
-				return(UpperStrKey==(int)Upper(AltKey) || (Translate && KeyToKeyLayoutCompare(AltKey,UpperStrKey)));
+				return(UpperStrKey==Upper(AltKey) || (Translate && KeyToKeyLayoutCompare(AltKey,UpperStrKey)));
 			}
 		}
 	}
@@ -2797,8 +2799,8 @@ int Dialog::ProcessKey(int Key)
 			}
 
 			return TRUE;
-		case KEY_LEFT:  case KEY_NUMPAD4: case KEY_MSWHEEL_LEFT:
-		case KEY_RIGHT: case KEY_NUMPAD6: case KEY_MSWHEEL_RIGHT:
+		case KEY_LEFT:  case KEY_NUMPAD4: case KEY_SHIFTNUMPAD4: case KEY_MSWHEEL_LEFT:
+		case KEY_RIGHT: case KEY_NUMPAD6: case KEY_SHIFTNUMPAD6: case KEY_MSWHEEL_RIGHT:
 		{
 			if (Item[FocusPos]->Type == DI_USERCONTROL) // для user-типа вываливаем
 				return TRUE;
@@ -3104,8 +3106,7 @@ int Dialog::ProcessKey(int Key)
 					return TRUE;
 				}
 
-				if (!(Item[FocusPos]->Flags & DIF_READONLY) ||
-				        ((Item[FocusPos]->Flags & DIF_READONLY) && IsNavKey(Key)))
+				if (!(Item[FocusPos]->Flags & DIF_READONLY) || IsNavKey(Key))
 				{
 					// "только что ломанулись и начинать выделение с нуля"?
 					if ((Opt.Dialogs.EditLine&DLGEDITLINE_NEWSELONGOTFOCUS) && Item[FocusPos]->SelStart != -1 && PrevFocusPos != FocusPos)// && Item[FocusPos].SelEnd)
@@ -4212,7 +4213,6 @@ BOOL Dialog::SelectFromEditHistory(DialogItemEx *CurItem,
 	FARString strRegKey=fmtSavedDialogHistory;
 	strRegKey+=HistoryName;
 	History DlgHist(HISTORYTYPE_DIALOG, Opt.DialogsHistoryCount, strRegKey, &Opt.Dialogs.EditHistory, false);
-	DlgHist.ReadHistory();
 	DlgHist.ResetPosition();
 	{
 		// создание пустого вертикального меню
@@ -4256,7 +4256,6 @@ int Dialog::AddToEditHistory(const wchar_t *AddStr,const wchar_t *HistoryName)
 	FARString strRegKey=fmtSavedDialogHistory;
 	strRegKey+=HistoryName;
 	History DlgHist(HISTORYTYPE_DIALOG, Opt.DialogsHistoryCount, strRegKey, &Opt.Dialogs.EditHistory, false);
-	DlgHist.ReadHistory();
 	DlgHist.AddToHistory(AddStr);
 	return TRUE;
 }
@@ -4517,7 +4516,7 @@ void Dialog::SetHelp(const wchar_t *Topic)
 
 	if (Topic && *Topic)
 	{
-		HelpTopic = new wchar_t [wcslen(Topic)+1];
+		HelpTopic = new(std::nothrow) wchar_t [wcslen(Topic)+1];
 
 		if (HelpTopic)
 			wcscpy(HelpTopic, Topic);
@@ -4783,16 +4782,8 @@ LONG_PTR Dialog::CallDlgProc(int nMsg, int nParam1, LONG_PTR nParam2)
 }
 
 //////////////////////////////////////////////////////////////////////////
-/* $ 28.07.2000 SVS
-   Посылка сообщения диалогу
-   Некоторые сообщения эта функция обрабатывает сама, не передавая управление
-   обработчику диалога.
-*/
-LONG_PTR WINAPI SendDlgMessage(HANDLE hDlg,int Msg,int Param1,LONG_PTR Param2)
+LONG_PTR SendDlgMessageSynched(HANDLE hDlg,int Msg,int Param1,LONG_PTR Param2)
 {
-	if (!hDlg)
-		return 0;
-
 	Dialog* Dlg=(Dialog*)hDlg;
 	CriticalSectionLock Lock(Dlg->CS);
 	_DIALOG(CleverSysLog CL(L"Dialog.SendDlgMessage()"));
@@ -5604,8 +5595,8 @@ LONG_PTR WINAPI SendDlgMessage(HANDLE hDlg,int Msg,int Param1,LONG_PTR Param2)
 		//   Return MAKELONG(OldVisible,OldSize)
 		case DM_SETCURSORSIZE:
 		{
-			bool Visible;
-			DWORD Size;
+			bool Visible = false;
+			DWORD Size = 0;
 
 			if (IsEdit(Type) && CurItem->ObjPtr)
 			{
@@ -6252,6 +6243,30 @@ LONG_PTR WINAPI SendDlgMessage(HANDLE hDlg,int Msg,int Param1,LONG_PTR Param2)
 
 			return (PrevFlags&DIF_DISABLE)?FALSE:TRUE;
 		}
+
+		case DM_GETCOLOR:
+		{
+			*(DWORD*)Param2=(DWORD)Dlg->CtlColorDlgItem(Param1, CurItem->Type,
+				CurItem->Focus, CurItem->DefaultButton, CurItem->Flags);
+			*(DWORD*)Param2|= (CurItem->Flags & DIF_SETCOLOR);
+			return TRUE;
+		}
+
+
+		case DM_SETCOLOR:
+		{
+			CurItem->Flags&= ~(DIF_SETCOLOR | DIF_COLORMASK);
+			CurItem->Flags|= Param2 & (DIF_SETCOLOR | DIF_COLORMASK);
+
+			if (Dlg->DialogMode.Check(DMODE_SHOW)) //???
+			{
+				Dlg->ShowDialog(Param1);
+				ScrBuf.Flush();
+			}
+
+			return TRUE;
+		}
+
 		/*****************************************************************/
 		// получить позицию и размеры контрола
 		case DM_GETITEMPOSITION: // Param1=ID, Param2=*SMALL_RECT
@@ -6360,6 +6375,19 @@ LONG_PTR WINAPI SendDlgMessage(HANDLE hDlg,int Msg,int Param1,LONG_PTR Param2)
 
 	// Все, что сами не отрабатываем - посылаем на обработку обработчику.
 	return Dlg->CallDlgProc(Msg,Param1,Param2);
+}
+
+/* $ 28.07.2000 SVS
+   Посылка сообщения диалогу
+   Некоторые сообщения эта функция обрабатывает сама, не передавая управление
+   обработчику диалога.
+*/
+LONG_PTR WINAPI SendDlgMessage(HANDLE hDlg,int Msg,int Param1,LONG_PTR Param2)
+{
+	if (!hDlg)
+		return 0;
+
+	return InterThreadCall<LONG_PTR, 0>(std::bind(SendDlgMessageSynched, hDlg, Msg, Param1, Param2));
 }
 
 void Dialog::SetPosition(int X1,int Y1,int X2,int Y2)

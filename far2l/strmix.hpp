@@ -97,7 +97,7 @@ inline bool IsWordDivSTNR(const wchar_t *WordDiv, wchar_t Chr)
 
 //   WordDiv  - набор разделителей слова в кодировке OEM
 // возвращает указатель на начало слова
-const wchar_t * const CalcWordFromString(const wchar_t *Str,int CurPos,int *Start,int *End,const wchar_t *WordDiv);
+const wchar_t * CalcWordFromString(const wchar_t *Str,int CurPos,int *Start,int *End,const wchar_t *WordDiv);
 
 wchar_t* WINAPI TruncStr(wchar_t *Str,int MaxLength);
 FARString& WINAPI TruncStr(FARString &strStr,int MaxLength);
@@ -118,5 +118,3 @@ void Transform(FARString &strBuffer,const wchar_t *ConvStr,wchar_t TransformType
 wchar_t GetDecimalSeparator();
 
 FARString ReplaceBrackets(const FARString& SearchStr,const FARString& ReplaceStr,RegExpMatch* Match,int Count);
-
-int FaultTolerantMultiByteToWideChar( UINT CodePage, LPCSTR lpMultiByteStr, int cbMultiByte, LPWSTR lpWideCharStr, int cchWideChar);

@@ -74,7 +74,7 @@ void FileList::PushPlugin(HANDLE hPlugin,const wchar_t *HostFile)
 
 int FileList::PopPlugin(int EnableRestoreViewMode)
 {
-	OpenPluginInfo Info={0};
+	OpenPluginInfo Info{};
 
 	if (PluginsList.Empty())
 	{
@@ -106,7 +106,7 @@ int FileList::PopPlugin(int EnableRestoreViewMode)
 
 		if (PStack->Modified)
 		{
-			PluginPanelItem PanelItem={0};
+			PluginPanelItem PanelItem{};
 			FARString strSaveDir;
 			apiGetCurrentDirectory(strSaveDir);
 
@@ -134,6 +134,7 @@ int FileList::PopPlugin(int EnableRestoreViewMode)
 	}
 	else
 	{
+		hPlugin = INVALID_HANDLE_VALUE;
 		PanelMode=NORMAL_PANEL;
 
 		if (EnableRestoreViewMode)
@@ -208,6 +209,8 @@ void FileList::FileListToPluginItem(FileListItem *fi,PluginPanelItem *pi)
 	pi->CRC32=fi->CRC32;
 	pi->Reserved[0]=pi->Reserved[1]=0;
 	pi->Owner=fi->strOwner.IsEmpty()?nullptr:(wchar_t*)fi->strOwner.CPtr();
+	pi->Group=fi->strGroup.IsEmpty()?nullptr:(wchar_t*)fi->strGroup.CPtr();
+
 }
 
 void FileList::FreePluginPanelItem(PluginPanelItem *pi)
@@ -223,6 +226,7 @@ size_t FileList::FileListToPluginItem2(FileListItem *fi,PluginPanelItem *pi)
 	size_t size=sizeof(*pi);
 	size+=sizeof(wchar_t)*(fi->strName.GetLength()+1);
 	size+=fi->strOwner.IsEmpty()?0:sizeof(wchar_t)*(fi->strOwner.GetLength()+1);
+	size+=fi->strGroup.IsEmpty()?0:sizeof(wchar_t)*(fi->strGroup.GetLength()+1);
 	size+=fi->DizText?sizeof(wchar_t)*(wcslen(fi->DizText)+1):0;
 	size+=fi->CustomColumnNumber*sizeof(wchar_t*);
 
@@ -239,11 +243,13 @@ size_t FileList::FileListToPluginItem2(FileListItem *fi,PluginPanelItem *pi)
 	if (pi)
 	{
 		char* data=(char*)(pi+1);
+
 		pi->FindData.lpwszFileName=wcscpy((wchar_t*)data,fi->strName);
 		data+=sizeof(wchar_t)*(fi->strName.GetLength()+1);
 		pi->FindData.nFileSize=fi->UnpSize;
 		pi->FindData.nPackSize=fi->PackSize;
 		pi->FindData.dwFileAttributes=fi->FileAttr;
+		pi->FindData.dwUnixMode=fi->FileMode;
 		pi->FindData.ftLastWriteTime=fi->WriteTime;
 		pi->FindData.ftCreationTime=fi->CreationTime;
 		pi->FindData.ftLastAccessTime=fi->AccessTime;
@@ -279,16 +285,6 @@ size_t FileList::FileListToPluginItem2(FileListItem *fi,PluginPanelItem *pi)
 			data+=sizeof(wchar_t)*(wcslen(fi->DizText)+1);
 		}
 
-		if (fi->UserData&&(fi->UserFlags&PPIF_USERDATA))
-		{
-			DWORD Size=*(DWORD *)fi->UserData;
-			pi->UserData=(DWORD_PTR)data;
-			memcpy((void *)pi->UserData,(void *)fi->UserData,Size);
-			data+=Size;
-		}
-		else
-			pi->UserData=fi->UserData;
-
 		pi->CRC32=fi->CRC32;
 		pi->Reserved[0]=pi->Reserved[1]=0;
 
@@ -299,7 +295,30 @@ size_t FileList::FileListToPluginItem2(FileListItem *fi,PluginPanelItem *pi)
 		else
 		{
 			pi->Owner=wcscpy((wchar_t*)data,fi->strOwner);
+			data+= sizeof(wchar_t) * (wcslen(fi->strOwner) + 1);
 		}
+
+		if (fi->strGroup.IsEmpty())
+		{
+			pi->Group=nullptr;
+		}
+		else
+		{
+			pi->Group=wcscpy((wchar_t*)data,fi->strGroup);
+			data+= sizeof(wchar_t) * (wcslen(fi->strGroup) + 1);
+		}
+
+		// copy user data at the end to avoid alignment troubles(hooting)
+		if (fi->UserData&&(fi->UserFlags&PPIF_USERDATA))
+		{
+			DWORD Size=*(DWORD *)fi->UserData;
+			pi->UserData=(DWORD_PTR)data;
+			memcpy((void *)pi->UserData,(const void *)fi->UserData,Size);
+			//data+=Size;
+		}
+		else
+			pi->UserData=fi->UserData;
+
 	}
 
 	return size;
@@ -309,6 +328,7 @@ void FileList::PluginToFileListItem(PluginPanelItem *pi,FileListItem *fi)
 {
 	fi->strName = pi->FindData.lpwszFileName;
 	fi->strOwner = pi->Owner;
+	fi->strGroup = pi->Group;
 
 	if (pi->Description)
 	{
@@ -523,7 +543,7 @@ void FileList::PutDizToPlugin(FileList *DestPanel,PluginPanelItem *ItemList,
 					CtrlObject->Plugins.PutFiles(DestPanel->hPlugin,&PanelItem,1,FALSE,OPM_SILENT|OPM_DESCR);
 				else if (Delete)
 				{
-					PluginPanelItem pi={0};
+					PluginPanelItem pi{};
 					pi.FindData.lpwszFileName = xf_wcsdup(DestPanel->strPluginDizName);
 					CtrlObject->Plugins.DeleteFiles(DestPanel->hPlugin,&pi,1,OPM_SILENT);
 					xf_free(pi.FindData.lpwszFileName);

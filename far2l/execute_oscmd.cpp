@@ -65,11 +65,27 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <vector>
 #include <string>
 #include <wordexp.h>
+#include <utils.h>
+
+//
+static bool MatchCommand(const std::string &cmd_line, const char *cmd)
+{
+	const size_t cmd_len = strlen(cmd);
+
+	if (cmd_line.size() == cmd_len) {
+		return cmd_line == cmd;
+	}
+
+	if (cmd_line.size() > cmd_len) {
+		return memcmp(cmd_line.c_str(), cmd, cmd_len) == 0 && isspace(cmd_line[cmd_len]);
+	}
+
+	return false;
+}
 
 // explode cmdline to argv[] array
 //
 // Bash cmdlines cannot be correctly parsed that way because some bash constructions are not space-separated (such as `...`, $(...), cmd>/dev/null, cmd&)
-
 // echo foo = bar       -> {'echo', 'foo', '=', 'bar'}
 // echo foo=bar         -> {'echo', 'foo=bar'}
 // echo "foo=long bar"  -> {'echo', 'foo=long bar'}
@@ -118,47 +134,24 @@ bool CommandLine::ProcessOSCommands(const wchar_t *CmdLine, bool SeparateWindow,
 			ClearScreen(COL_COMMANDLINEUSERSCREEN);
 			SaveBackground();
 			VTLog::Reset();
-			PrintCommand = false;
-			return true;
 		}
-	} else if (ecl[0]=="cd") {
-		if (ecl.size() == 1 )
-			ecl.push_back("~");
-		if (ecl.size() == 2 ) {
-			if (IntChDir(StrMB2Wide(ecl[1]).c_str(), true, false))
-				return true;
-		}
-	} else if (ecl[0]=="pushd") {
-		if (ecl.size() == 1 )
-			ecl.push_back("~");
-		if (ecl.size() == 2 ) {
-			PushPopRecord prec;
-			prec.strName = strCurDir;
-			if (IntChDir(StrMB2Wide(ecl[1]).c_str(), true, false)) {
-				ppstack.Push(prec);
-				setenv("FARDIRSTACK", Wide2MB(prec.strName.CPtr()).c_str(), 1);
-				return true;				
-			}
-		}
-	} else if (ecl[0]=="popd") {
-		if (ecl.size() == 1 ) {
-			PushPopRecord prec;
 
-			if (ppstack.Pop(prec)) {
-				int Ret = IntChDir(prec.strName, true, false);
-				PushPopRecord *ptrprec=ppstack.Peek();
-				if (ptrprec)
-					setenv("FARDIRSTACK", Wide2MB(ptrprec->strName.CPtr()).c_str(), 1);
-				else
-					unsetenv("FARDIRSTACK");
-				return Ret;
-			}
+	} else if (ecl[0]=="pushd") {
+		if (PushDirStackSize < 10) {
+			++PushDirStackSize;
 		}
+
+	} else if (ecl[0]=="popd") {
+		if (PushDirStackSize > 0) {
+			--PushDirStackSize;
+		}
+
 	}else if (ecl[0]=="exit") {
 		if (ecl.size() == 2 && ecl[1]=="far") {
 			FrameManager->ExitMainLoop(FALSE);
 			return true;			
 		}
+		PushDirStackSize = 0;
 	}
 
 	return false;

@@ -246,8 +246,8 @@ bool PluginManager::LoadPlugin(
 
 	switch (IsModulePlugin(lpwszModuleName))
 	{
-		case WIDE_PLUGIN: pPlugin = new PluginW(this, lpwszModuleName); break;
-		case MULTIBYTE_PLUGIN: pPlugin = new PluginA(this, lpwszModuleName); break;
+		case WIDE_PLUGIN: pPlugin = new(std::nothrow) PluginW(this, lpwszModuleName); break;
+		case MULTIBYTE_PLUGIN: pPlugin = new(std::nothrow) PluginA(this, lpwszModuleName); break;
 		default: return false;
 	}
 
@@ -389,6 +389,8 @@ void PluginManager::LoadPlugins()
 {
 	Flags.Clear(PSIF_PLUGINSLOADDED);
 
+	clock_t cl_start = clock();
+
 	if (Opt.LoadPlug.PluginsCacheOnly)  // $ 01.09.2000 tran  '/co' switch
 	{
 		LoadPluginsFromCache();
@@ -460,6 +462,11 @@ void PluginManager::LoadPlugins()
 	}
 
 	Flags.Set(PSIF_PLUGINSLOADDED);
+
+	clock_t cl_end = clock();
+
+	fprintf(stderr, "STARTUP=%ld\n", long(cl_end - cl_start) );
+
 	far_qsort(PluginsData, PluginsCount, sizeof(*PluginsData), PluginsSort);
 }
 
@@ -559,7 +566,8 @@ HANDLE PluginManager::OpenFilePlugin(const wchar_t *Name, const unsigned char *D
 HANDLE PluginManager::OpenFilePlugin(
     const wchar_t *Name,
     int OpMode,
-    OPENFILEPLUGINTYPE Type
+    OPENFILEPLUGINTYPE Type,
+    Plugin *pDesiredPlugin
 )
 {
 	ChangePriority ChPriority(ChangePriority::NORMAL);
@@ -589,6 +597,8 @@ HANDLE PluginManager::OpenFilePlugin(
 	for (int i = 0; i < PluginsCount; i++)
 	{
 		pPlugin = PluginsData[i];
+		if (pDesiredPlugin != nullptr && pDesiredPlugin != pPlugin)
+			continue;
 
 		if (!pPlugin->HasOpenFilePlugin() && !(pPlugin->HasAnalyse() && pPlugin->HasOpenPlugin()))
 			continue;
@@ -597,7 +607,7 @@ HANDLE PluginManager::OpenFilePlugin(
 		{
 			if (file.Open(Name, FILE_READ_DATA, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN))
 			{
-				Data = new BYTE[Opt.PluginMaxReadData];
+				Data = new(std::nothrow) BYTE[Opt.PluginMaxReadData];
 				if (Data)
 				{
 					if (file.Read(Data, Opt.PluginMaxReadData, &DataSize))
@@ -850,6 +860,18 @@ void PluginManager::ClosePlugin(HANDLE hPlugin)
 	PluginHandle *ph = (PluginHandle*)hPlugin;
 	ph->pPlugin->ClosePlugin(ph->hPlugin);
 	delete ph;
+}
+
+HANDLE PluginManager::GetRealPluginHandle(HANDLE hPlugin)
+{
+	PluginHandle *ph = (PluginHandle*)hPlugin;
+	return ph->hPlugin;
+}
+
+FARString PluginManager::GetPluginModuleName(HANDLE hPlugin)
+{
+	PluginHandle *ph = (PluginHandle*)hPlugin;
+	return ph->pPlugin->GetModuleName();
 }
 
 
@@ -1257,7 +1279,7 @@ void PluginManager::Configure(int StartPos)
 				MenuItemNumber=0;
 				LoadIfCacheAbsent();
 				FARString strHotKey, strRegKey, strValue, strName;
-				PluginInfo Info={0};
+				PluginInfo Info{};
 
 				for (int I=0; I<PluginsCount; I++)
 				{
@@ -1424,7 +1446,7 @@ int PluginManager::CommandsMenu(int ModalType,int StartPos,const wchar_t *Histor
 				PluginList.SetPosition(-1,-1,0,0);
 				LoadIfCacheAbsent();
 				FARString strHotKey, strRegKey, strValue, strName;
-				PluginInfo Info={0};
+				PluginInfo Info{};
 
 				for (int I=0; I<PluginsCount; I++)
 				{
@@ -1684,10 +1706,10 @@ bool PluginManager::SetHotKeyDialog(
 	*/
 	DialogDataEx PluginDlgData[]=
 	{
-		DI_DOUBLEBOX,3,1,60,4,0,0,MSG(MPluginHotKeyTitle),
-		DI_TEXT,5,2,0,2,0,0,MSG(MPluginHotKey),
-		DI_FIXEDIT,5,3,5,3,0,DIF_FOCUS|DIF_DEFAULT,L"",
-		DI_TEXT,8,3,58,3,0,0,DlgPluginTitle,
+		{DI_DOUBLEBOX,3,1,60,4,{},0,MSG(MPluginHotKeyTitle)},
+		{DI_TEXT,5,2,0,2,{},0,MSG(MPluginHotKey)},
+		{DI_FIXEDIT,5,3,5,3,{},DIF_FOCUS|DIF_DEFAULT,L""},
+		{DI_TEXT,8,3,58,3,{},0,DlgPluginTitle}
 	};
 	MakeDialogItemsEx(PluginDlgData,PluginDlg);
 	GetRegKey(RegKey,RegValueName,PluginDlg[2].strData,L"");
@@ -2093,7 +2115,7 @@ void PluginManager::GetCustomData(FileListItem *ListItem)
 	{
 		Plugin *pPlugin = PluginsData[i];
 
-		wchar_t *CustomData = NULL;
+		wchar_t *CustomData = nullptr;
 
 		if (pPlugin->HasGetCustomData() && pPlugin->GetCustomData(FilePath.CPtr(), &CustomData))
 		{
@@ -2105,4 +2127,20 @@ void PluginManager::GetCustomData(FileListItem *ListItem)
 				pPlugin->FreeCustomData(CustomData);
 		}
 	}
+}
+
+bool PluginManager::MayExitFar()
+{
+	bool out = true;
+	for (int i=0; i<PluginsCount; i++)
+	{
+		Plugin *pPlugin = PluginsData[i];
+
+		if (pPlugin->HasMayExitFAR() && !pPlugin->MayExitFAR())
+		{
+			out = false;
+		}
+	}
+
+	return out;
 }

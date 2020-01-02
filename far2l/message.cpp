@@ -44,6 +44,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "interf.hpp"
 #include "palette.hpp"
 #include "config.hpp"
+#include "InterThreadCall.hpp"
 
 static int MessageX1,MessageY1,MessageX2,MessageY2;
 static FARString strMsgHelpTopic;
@@ -144,7 +145,7 @@ LONG_PTR WINAPI MsgDlgProc(HANDLE hDlg,int Msg,int Param1,LONG_PTR Param2)
 	return DefDlgProc(hDlg,Msg,Param1,Param2);
 }
 
-int Message(
+static int MessageSynched(
     DWORD Flags,
     int Buttons,
     const wchar_t *Title,
@@ -306,7 +307,7 @@ int Message(
 	{
 		DWORD ItemCount=StrCount+Buttons+1;
 		DialogItemEx *PtrMsgDlg;
-		DialogItemEx *MsgDlg = new DialogItemEx[ItemCount+1];
+		DialogItemEx *MsgDlg = new(std::nothrow) DialogItemEx[ItemCount+1];
 
 		if (!MsgDlg)
 		{
@@ -533,6 +534,11 @@ int Message(
 	return 0;
 }
 
+int Message( DWORD Flags, int Buttons, const wchar_t *Title,
+	const wchar_t * const *Items, int ItemsNumber, INT_PTR PluginNumber)
+{
+	return InterThreadCall<int, 0>(std::bind(MessageSynched, Flags, Buttons, Title, Items, ItemsNumber, PluginNumber));
+}
 
 void GetMessagePosition(int &X1,int &Y1,int &X2,int &Y2)
 {

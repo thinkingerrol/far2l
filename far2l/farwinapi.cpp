@@ -35,7 +35,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <sys/stat.h>
 #include <sys/statvfs.h>
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__CYGWIN__)
   #include <errno.h>
   #include <sys/mount.h>
 #else
@@ -158,7 +158,7 @@ static void TranslateFindFile(const WIN32_FIND_DATA &wfd, FAR_FIND_DATA_EX& Find
 
 static bool FindNextFileInternal(HANDLE Find, FAR_FIND_DATA_EX& FindData)
 {
-	WIN32_FIND_DATA wfd = {0};
+	WIN32_FIND_DATA wfd{};
 	if (!WINPORT(FindNextFile)(Find, &wfd))
 		return FALSE;
 
@@ -179,7 +179,7 @@ FindFile::FindFile(LPCWSTR Object, bool ScanSymLink, DWORD WinPortFindFlags) :
 
 	WinPortFindFlags|= FIND_FILE_FLAG_NO_CUR_UP;
 
-	WIN32_FIND_DATA wfd = {0};
+	WIN32_FIND_DATA wfd{};
 	Handle = WINPORT(FindFirstFileWithFlags)(strName, &wfd, WinPortFindFlags);
 	if (Handle!=INVALID_HANDLE_VALUE) {
 		TranslateFindFile(wfd, Data);
@@ -244,7 +244,7 @@ bool File::Read(LPVOID Buffer, DWORD NumberOfBytesToRead, LPDWORD NumberOfBytesR
 	return WINPORT(ReadFile)(Handle, Buffer, NumberOfBytesToRead, NumberOfBytesRead, Overlapped) != FALSE;
 }
 
-bool File::Write(LPCVOID Buffer, DWORD NumberOfBytesToWrite, LPDWORD NumberOfBytesWritten, LPOVERLAPPED Overlapped) const
+bool File::Write(LPCVOID Buffer, DWORD NumberOfBytesToWrite, LPDWORD NumberOfBytesWritten, LPOVERLAPPED Overlapped)
 {
 	return WINPORT(WriteFile)(Handle, Buffer, NumberOfBytesToWrite, NumberOfBytesWritten, Overlapped) != FALSE;
 }
@@ -398,6 +398,9 @@ bool File::Eof()
 	GetSize(Size);
 	return static_cast<UINT64>(Ptr)==Size;
 }
+
+
+//////////////////////////////////////////////////////////////
 
 BOOL apiDeleteFile(const wchar_t *lpwszFileName)
 {
@@ -617,9 +620,13 @@ BOOL apiGetVolumeInformation(
 
 	if (pFileSystemName) {
 		pFileSystemName->Clear();
-
+#if !defined(__FreeBSD__) && !defined(__CYGWIN__)
 		struct statfs sfs = {};
 		if (sdc_statfs(path.c_str(), &sfs) == 0) {
+#else
+		struct statfs sfs;
+		if (statfs(path.c_str(), &sfs) == 0) {
+#endif
 			for (size_t i = 0; i < ARRAYSIZE(s_fs_magics); ++i) {
 				if (sfs.f_type == s_fs_magics[i].magic) {
 					*pFileSystemName = s_fs_magics[i].name;
@@ -677,7 +684,7 @@ BOOL apiGetFindDataEx(const wchar_t *lpwszFileName, FAR_FIND_DATA_EX& FindData,b
 	}
 	else if (!wcspbrk(lpwszFileName,L"*?"))
 	{
-		struct stat s = {0};
+		struct stat s{};
 		if (sdc_stat(Wide2MB(lpwszFileName).c_str(), &s)==0) {
 			FindData.Clear();
 			WINPORT(FileTime_UnixToWin32)(s.st_mtim, &FindData.ftLastWriteTime);
@@ -852,7 +859,7 @@ IUnmakeWritablePtr apiMakeWritable(LPCWSTR lpFileName)
 		}
 	}
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__CYGWIN__)
 //TODO: handle chattr +i
 #else
 	if (!um->dir.empty() && sdc_fs_flags_get(um->dir.c_str(), &um->dir_flags) != -1 
@@ -862,7 +869,8 @@ IUnmakeWritablePtr apiMakeWritable(LPCWSTR lpFileName)
 		}
 	}
 
-	if (sdc_fs_flags_get(um->target.c_str(), &um->target_flags) != -1 
+	if ( (s.st_mode & S_IFMT) == S_IFREG // calling sdc_fs_flags_get on special files useless and may stuck
+	&& sdc_fs_flags_get(um->target.c_str(), &um->target_flags) != -1
 	&& (um->target_flags & FS_IMMUTABLE_FL) != 0) {
 		if (sdc_fs_flags_set(um->target.c_str(), um->target_flags & ~FS_IMMUTABLE_FL) != -1) {
 			um->target_flags_modified = true;

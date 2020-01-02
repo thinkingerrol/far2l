@@ -17,6 +17,7 @@
 extern "C" {
 #endif
 	int WinPortMain(int argc, char **argv, int (*AppMain)(int argc, char **argv));
+	void WinPortHelp();
 
 	///console API
 	WINPORT_DECL(GetConsoleFontSize,COORD,( HANDLE hConsoleOutput, DWORD  nFont));
@@ -61,7 +62,7 @@ extern "C" {
 	WINPORT_DECL(SetConsoleScrollRegion, VOID, (HANDLE hConsoleOutput, SHORT top, SHORT bottom));
 	WINPORT_DECL(GetConsoleScrollRegion, VOID, (HANDLE hConsoleOutput, SHORT *top, SHORT *bottom));
 
-	typedef VOID (*PCONSOLE_SCROLL_CALLBACK)(PVOID pContext, unsigned int Top, unsigned int Width, CHAR_INFO *Charss);
+	typedef VOID (*PCONSOLE_SCROLL_CALLBACK)(PVOID pContext, unsigned int Width, CHAR_INFO *Charss);
 	WINPORT_DECL(SetConsoleScrollCallback, VOID, (HANDLE hConsoleOutput, PCONSOLE_SCROLL_CALLBACK pCallback, PVOID pContext));
 	WINPORT_DECL(BeginConsoleAdhocQuickEdit, BOOL, ());	
 	WINPORT_DECL(SetConsoleTweaks, DWORD, (DWORD tweaks));
@@ -77,6 +78,7 @@ extern "C" {
 
 	WINPORT_DECL(ConsoleChangeFont, VOID, ());
 	WINPORT_DECL(IsConsoleActive, BOOL, ());
+	WINPORT_DECL(ConsoleDisplayNotification, VOID, (const WCHAR *title, const WCHAR *text));
 
 	///Registry API
 	WINPORT_DECL(RegOpenKeyEx, LONG, (HKEY hKey,LPCWSTR lpSubKey, DWORD ulOptions, REGSAM samDesired, PHKEY phkResult));
@@ -301,4 +303,3 @@ struct RegWipeScope
 	}
 };
 #endif
-

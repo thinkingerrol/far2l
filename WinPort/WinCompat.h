@@ -64,7 +64,6 @@ typedef unsigned __int64 uint64_t;
 #define _read sdc_read
 #define _lseek sdc_lseek
 #define _chsize sdc_ftruncate
-#define _swab swab
 #define _itoa itoa
 
 #define __cdecl
@@ -82,7 +81,9 @@ typedef unsigned __int64 uint64_t;
 # define st_ctim st_ctimespec
 # define st_atim st_atimespec
 # include <sys/syslimits.h>
-#else
+#elif __FreeBSD__
+# include <sys/syslimits.h>
+#elif defined(__linux__)
 # include <linux/limits.h>
 #endif
 
@@ -100,7 +101,8 @@ static int64_t _wtoi64(const wchar_t *w)
 	wchar_t *endptr = 0;
 	return wcstoll(w, &endptr, 10);
 }
-	
+
+#ifndef __CYGWIN__	
 static char * itoa(int i, char *a, int radix)
 {
 	switch (radix) {
@@ -109,6 +111,7 @@ static char * itoa(int i, char *a, int radix)
 	}
 	return a;
 }
+#endif
 
 static char * _i64toa(int64_t i, char *a, int radix)
 {
@@ -547,6 +550,7 @@ typedef struct _MOUSE_EVENT_RECORD {
 #define WINDOW_BUFFER_SIZE_EVENT 0x0004 // Event contains window change event record
 #define MENU_EVENT 0x0008 // Event contains menu event record
 #define FOCUS_EVENT 0x0010 // event contains focus change
+#define NOOP_EVENT 0x0080 // nothing interesting, typically injected to kick events dispatcher
 
 
 typedef struct _INPUT_RECORD {

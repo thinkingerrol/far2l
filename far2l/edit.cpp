@@ -920,7 +920,7 @@ int Edit::ProcessKey(int Key)
 
 			if (Mask && *Mask)
 			{
-				wchar_t *ShortStr=new wchar_t[StrSize+1];
+				wchar_t *ShortStr=new(std::nothrow) wchar_t[StrSize+1];
 
 				if (!ShortStr)
 					return FALSE;
@@ -1180,7 +1180,7 @@ int Edit::ProcessKey(int Key)
 
 			if (Mask && *Mask)
 			{
-				wchar_t *ShortStr=new wchar_t[StrSize+1];
+				wchar_t *ShortStr=new(std::nothrow) wchar_t[StrSize+1];
 
 				if (!ShortStr)
 					return FALSE;
@@ -1214,7 +1214,7 @@ int Edit::ProcessKey(int Key)
 
 			if (Mask && *Mask)
 			{
-				wchar_t *ShortStr=new wchar_t[StrSize+1];
+				wchar_t *ShortStr=new(std::nothrow) wchar_t[StrSize+1];
 
 				if (!ShortStr)
 					return FALSE;
@@ -1309,7 +1309,7 @@ int Edit::ProcessKey(int Key)
 
 			if (Mask && *Mask)
 			{
-				wchar_t *ShortStr=new wchar_t[StrSize+1];
+				wchar_t *ShortStr=new(std::nothrow) wchar_t[StrSize+1];
 
 				if (!ShortStr)
 					return FALSE;
@@ -1359,7 +1359,7 @@ int Edit::ProcessKey(int Key)
 				{
 					if (Mask && *Mask)
 					{
-						wchar_t *ShortStr=new wchar_t[StrSize+1];
+						wchar_t *ShortStr=new(std::nothrow) wchar_t[StrSize+1];
 
 						if (!ShortStr)
 							return FALSE;
@@ -1453,7 +1453,7 @@ int Edit::ProcessKey(int Key)
 		default:
 		{
 //      _D(SysLog(L"Key=0x%08X",Key));
-			if (Key==KEY_NONE || Key==KEY_IDLE || Key==KEY_ENTER || Key==KEY_NUMENTER || Key>=65536)
+			if (Key==KEY_ENTER || Key>=EXTENDED_KEY_BASE) // KEY_NUMENTER,KEY_IDLE,KEY_NONE covered by >=EXTENDED_KEY_BASE
 				break;
 
 			if (!Flags.Check(FEDITLINE_PERSISTENTBLOCKS))
@@ -1980,7 +1980,7 @@ void Edit::InsertBinaryString(const wchar_t *Str,int Length)
 			}
 
 			int TmpSize=StrSize-CurPos;
-			wchar_t *TmpStr=new wchar_t[TmpSize+16];
+			wchar_t *TmpStr=new(std::nothrow) wchar_t[TmpSize+16];
 
 			if (!TmpStr)
 				return;
@@ -2324,7 +2324,7 @@ void Edit::SetTabCurPos(int NewPos)
 
 	if (Mask && *Mask)
 	{
-		wchar_t *ShortStr=new wchar_t[StrSize+1];
+		wchar_t *ShortStr=new(std::nothrow) wchar_t[StrSize+1];
 
 		if (!ShortStr)
 			return;

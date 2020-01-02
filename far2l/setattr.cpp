@@ -55,7 +55,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "fileowner.hpp"
 #include "wakeful.hpp"
 #include "DlgGuid.hpp"
-#include <list>
+#include "execute.hpp"
 
 
 enum SETATTRDLG
@@ -174,7 +174,7 @@ LONG_PTR WINAPI SetAttrDlgProc(HANDLE hDlg,int Msg,int Param1,LONG_PTR Param2)
 							if (DlgParam->OSubfoldersState != SubfoldersState) // Состояние изменилось?
 							{
 								// установили?
-								if (SubfoldersState)
+								if (SubfoldersState != BSTATE_UNCHECKED)
 								{
 									for (int i=SA_ATTR_FIRST; i<=SA_ATTR_LAST; i++)
 									{
@@ -218,7 +218,7 @@ LONG_PTR WINAPI SetAttrDlgProc(HANDLE hDlg,int Msg,int Param1,LONG_PTR Param2)
 										{
 											if (!*ParamTimes[i])
 											{
-												SendDlgMessage(hDlg,DM_SETATTR,Items[i],SubfoldersState?0:(LONG_PTR)FDTimes[i]);
+												SendDlgMessage(hDlg,DM_SETATTR,Items[i],(SubfoldersState != BSTATE_UNCHECKED)?0:(LONG_PTR)FDTimes[i]);
 												*ParamTimes[i]=false;
 											}
 										}
@@ -233,7 +233,7 @@ LONG_PTR WINAPI SetAttrDlgProc(HANDLE hDlg,int Msg,int Param1,LONG_PTR Param2)
 							if (DlgParam->OSubfoldersState!=SubfoldersState)
 							{
 								// установили?
-								if (SubfoldersState)
+								if (SubfoldersState != BSTATE_UNCHECKED)
 								{
 									for (int i=SA_ATTR_FIRST; i<= SA_ATTR_LAST; i++)
 									{
@@ -525,35 +525,15 @@ void PR_ShellSetFileAttributesMsg()
 
 static void SystemProperties(const FARString &strSelName)
 {
+	std::vector<std::wstring> lines;
+
 	std::string cmd = "file \"";
 	cmd+= EscapeQuotas(Wide2MB(strSelName.CPtr()));
 	cmd+= '\"';
-	FILE *f = popen(cmd.c_str(), "r");
-	if (!f) {
-		perror("SystemProperties: popen");
-		return;
-	}
 
-	std::list<std::wstring> lines;
-	char buf[0x400] = { };
-	while (fgets(buf, sizeof(buf)-1, f)) {
-		size_t l = strlen(buf);
-		while (l && (buf[l-1]=='\r' || buf[l-1]=='\n')) --l;
-		if (l) {
-			buf[l] = 0;
-			std::wstring line = MB2Wide(buf);
-			while (line.size() > 40) {
-				size_t p = line.find(L',' , 30);
-				if (p==std::string::npos) break;
-				lines.push_back( line.substr(0, p) );
-				line.erase(0, p + 1);
-			}
-			
-			if (!line.empty()) lines.push_back( line );
-		}
-	}
-	pclose(f);
-	
+	if (!POpen(lines, cmd.c_str()))
+		return;
+
 	if (lines.empty())
 		return;
 		
@@ -603,50 +583,50 @@ bool ShellSetFileAttributes(Panel *SrcPanel,LPCWSTR Object)
 
 	DialogDataEx AttrDlgData[]=
 	{
-		DI_DOUBLEBOX,3,1,short(DlgX-4),short(DlgY-2),0,0,MSG(MSetAttrTitle),
-		DI_TEXT,-1,2,0,2,0,0,MSG(MSetAttrFor),
-		DI_TEXT,-1,3,0,3,0,DIF_SHOWAMPERSAND,L"",
-		DI_TEXT,3,4,0,4,0,DIF_SEPARATOR,L"",
-		DI_TEXT,5,5,17,5,0,0,MSG(MSetAttrOwner),
-		DI_EDIT,18,5,short(DlgX-6),5,0,0,L"",
-		DI_TEXT,5,6,17,6,0,0,MSG(MSetAttrGroup),//L"Group:",
-		DI_EDIT,18,6,short(DlgX-6),6,0,0,L"",
-		DI_TEXT,3,7,0,7,0,DIF_SEPARATOR,L"",
-		DI_TEXT,5,8,0,8,0,0,MSG(MSetAttrAccessUser),//L"User",
-		DI_TEXT,short(DlgX/3),8,0,8,0,0,MSG(MSetAttrAccessGroup),//L"Group",
-		DI_TEXT,short(2*DlgX/3),8,0,8,0,0,MSG(MSetAttrAccessOther),//L"Other",
-		DI_CHECKBOX,5,9,0,9,0,DIF_FOCUS|DIF_3STATE, MSG(MSetAttrAccessUserRead),//L"Read",
-		DI_CHECKBOX,5,10,0,10,0,DIF_3STATE, MSG(MSetAttrAccessUserWrite),//L"Write",
-		DI_CHECKBOX,5,11,0,11,0,DIF_3STATE, MSG(MSetAttrAccessUserExecute),//L"Execute",
-		DI_CHECKBOX,short(DlgX/3),9,0,9,0,DIF_3STATE, MSG(MSetAttrAccessGroupRead),//L"Read",
-		DI_CHECKBOX,short(DlgX/3),10,0,10,0,DIF_3STATE, MSG(MSetAttrAccessGroupWrite),//L"Write",
-		DI_CHECKBOX,short(DlgX/3),11,0,11,0,DIF_3STATE, MSG(MSetAttrAccessGroupExecute),//L"Execute",
-		DI_CHECKBOX,short(2*DlgX/3),9,0,9,0,DIF_3STATE, MSG(MSetAttrAccessOtherRead),//L"Read",
-		DI_CHECKBOX,short(2*DlgX/3),10,0,10,0,DIF_3STATE, MSG(MSetAttrAccessOtherWrite),//L"Write",
-		DI_CHECKBOX,short(2*DlgX/3),11,0,11,0,DIF_3STATE, MSG(MSetAttrAccessOtherExecute),//L"Execute",
-		DI_TEXT,3,12,0,12,0,DIF_SEPARATOR,L"",
-		DI_TEXT,short(DlgX-29),13,0,13,0,0,L"",
-		DI_TEXT,    5,14,0,14,0,0, MSG(MSetAttrAccessTime),//L"Last access time",
-		DI_FIXEDIT,short(DlgX-29),14,short(DlgX-19),14,0,DIF_MASKEDIT,L"",
-		DI_FIXEDIT,short(DlgX-17),14,short(DlgX-6),14,0,DIF_MASKEDIT,L"",
-		DI_TEXT,    5,15,0,15,0,0, MSG(MSetAttrModificationTime),//L"Last modification time",
-		DI_FIXEDIT,short(DlgX-29),15,short(DlgX-19),15,0,DIF_MASKEDIT,L"",
-		DI_FIXEDIT,short(DlgX-17),15,short(DlgX-6),15,0,DIF_MASKEDIT,L"",
-		DI_TEXT,    5,16,0,16,0,0, MSG(MSetAttrStatusChangeTime),//L"Last status change time",
-		DI_FIXEDIT,short(DlgX-29),16,short(DlgX-19),16,0,DIF_MASKEDIT|DIF_READONLY,L"",
-		DI_FIXEDIT,short(DlgX-17),16,short(DlgX-6),16,0,DIF_MASKEDIT|DIF_READONLY,L"",
-		DI_BUTTON,0,18,0,18,0,DIF_CENTERGROUP|DIF_BTNNOCLOSE,MSG(MSetAttrOriginal),
-		DI_BUTTON,0,18,0,18,0,DIF_CENTERGROUP|DIF_BTNNOCLOSE,MSG(MSetAttrCurrent),
-		DI_BUTTON,0,18,0,18,0,DIF_CENTERGROUP|DIF_BTNNOCLOSE,MSG(MSetAttrBlank),
-		DI_TEXT,3,19,0,19,0,DIF_SEPARATOR|DIF_HIDDEN,L"",
-		DI_CHECKBOX,5,20,0,20,0,DIF_DISABLE|DIF_HIDDEN,MSG(MSetAttrSubfolders),
-		DI_TEXT,3,short(DlgY-4),0,short(DlgY-4),0,DIF_SEPARATOR,L"",
-		DI_BUTTON,0,short(DlgY-3),0,short(DlgY-3),0,DIF_DEFAULT|DIF_CENTERGROUP,MSG(MSetAttrSet),
-		DI_BUTTON,0,short(DlgY-3),0,short(DlgY-3),0,DIF_CENTERGROUP|DIF_DISABLE,MSG(MSetAttrSystemDialog),
-		DI_BUTTON,0,short(DlgY-3),0,short(DlgY-3),0,DIF_CENTERGROUP,MSG(MCancel)
+		{DI_DOUBLEBOX,3,1,short(DlgX-4),short(DlgY-2),{},0,MSG(MSetAttrTitle)},
+		{DI_TEXT,-1,2,0,2,{},0,MSG(MSetAttrFor)},
+		{DI_TEXT,-1,3,0,3,{},DIF_SHOWAMPERSAND,L""},
+		{DI_TEXT,3,4,0,4,{},DIF_SEPARATOR,L""},
+		{DI_TEXT,5,5,17,5,{},0,MSG(MSetAttrOwner)},
+		{DI_EDIT,18,5,short(DlgX-6),5,{},0,L""},
+		{DI_TEXT,5,6,17,6,{},0,MSG(MSetAttrGroup)},//L"Group:",
+		{DI_EDIT,18,6,short(DlgX-6),6,{},0,L""},
+		{DI_TEXT,3,7,0,7,{},DIF_SEPARATOR,L""},
+		{DI_TEXT,5,8,0,8,{},0,MSG(MSetAttrAccessUser)},//L"User",
+		{DI_TEXT,short(DlgX/3),8,0,8,{},0,MSG(MSetAttrAccessGroup)},//L"Group",
+		{DI_TEXT,short(2*DlgX/3),8,0,8,{},0,MSG(MSetAttrAccessOther)},//L"Other",
+		{DI_CHECKBOX,5,9,0,9,{},DIF_FOCUS|DIF_3STATE, MSG(MSetAttrAccessUserRead)},//L"Read",
+		{DI_CHECKBOX,5,10,0,10,{},DIF_3STATE, MSG(MSetAttrAccessUserWrite)},//L"Write",
+		{DI_CHECKBOX,5,11,0,11,{},DIF_3STATE, MSG(MSetAttrAccessUserExecute)},//L"Execute",
+		{DI_CHECKBOX,short(DlgX/3),9,0,9,{},DIF_3STATE, MSG(MSetAttrAccessGroupRead)},//L"Read",
+		{DI_CHECKBOX,short(DlgX/3),10,0,10,{},DIF_3STATE, MSG(MSetAttrAccessGroupWrite)},//L"Write",
+		{DI_CHECKBOX,short(DlgX/3),11,0,11,{},DIF_3STATE, MSG(MSetAttrAccessGroupExecute)},//L"Execute",
+		{DI_CHECKBOX,short(2*DlgX/3),9,0,9,{},DIF_3STATE, MSG(MSetAttrAccessOtherRead)},//L"Read",
+		{DI_CHECKBOX,short(2*DlgX/3),10,0,10,{},DIF_3STATE, MSG(MSetAttrAccessOtherWrite)},//L"Write",
+		{DI_CHECKBOX,short(2*DlgX/3),11,0,11,{},DIF_3STATE, MSG(MSetAttrAccessOtherExecute)},//L"Execute",
+		{DI_TEXT,3,12,0,12,{},DIF_SEPARATOR,L""},
+		{DI_TEXT,short(DlgX-29),13,0,13,{},0,L""},
+		{DI_TEXT,    5,14,0,14,{},0, MSG(MSetAttrAccessTime)},//L"Last access time",
+		{DI_FIXEDIT,short(DlgX-29),14,short(DlgX-19),14,{},DIF_MASKEDIT,L""},
+		{DI_FIXEDIT,short(DlgX-17),14,short(DlgX-6),14,{},DIF_MASKEDIT,L""},
+		{DI_TEXT,    5,15,0,15,{},0, MSG(MSetAttrModificationTime)},//L"Last modification time",
+		{DI_FIXEDIT,short(DlgX-29),15,short(DlgX-19),15,{},DIF_MASKEDIT,L""},
+		{DI_FIXEDIT,short(DlgX-17),15,short(DlgX-6),15,{},DIF_MASKEDIT,L""},
+		{DI_TEXT,    5,16,0,16,{},0, MSG(MSetAttrStatusChangeTime)},//L"Last status change time",
+		{DI_FIXEDIT,short(DlgX-29),16,short(DlgX-19),16,{},DIF_MASKEDIT|DIF_READONLY,L""},
+		{DI_FIXEDIT,short(DlgX-17),16,short(DlgX-6),16,{},DIF_MASKEDIT|DIF_READONLY,L""},
+		{DI_BUTTON,0,18,0,18,{},DIF_CENTERGROUP|DIF_BTNNOCLOSE,MSG(MSetAttrOriginal)},
+		{DI_BUTTON,0,18,0,18,{},DIF_CENTERGROUP|DIF_BTNNOCLOSE,MSG(MSetAttrCurrent)},
+		{DI_BUTTON,0,18,0,18,{},DIF_CENTERGROUP|DIF_BTNNOCLOSE,MSG(MSetAttrBlank)},
+		{DI_TEXT,3,19,0,19,{},DIF_SEPARATOR|DIF_HIDDEN,L""},
+		{DI_CHECKBOX,5,20,0,20,{},DIF_DISABLE|DIF_HIDDEN,MSG(MSetAttrSubfolders)},
+		{DI_TEXT,3,short(DlgY-4),0,short(DlgY-4),{},DIF_SEPARATOR,L""},
+		{DI_BUTTON,0,short(DlgY-3),0,short(DlgY-3),{},DIF_DEFAULT|DIF_CENTERGROUP,MSG(MSetAttrSet)},
+		{DI_BUTTON,0,short(DlgY-3),0,short(DlgY-3),{},DIF_CENTERGROUP|DIF_DISABLE,MSG(MSetAttrSystemDialog)},
+		{DI_BUTTON,0,short(DlgY-3),0,short(DlgY-3),{},DIF_CENTERGROUP,MSG(MCancel)}
 	};
 	MakeDialogItemsEx(AttrDlgData,AttrDlg);
-	SetAttrDlgParam DlgParam={0};
+	SetAttrDlgParam DlgParam{};
 	int SelCount=SrcPanel?SrcPanel->GetSelCount():1;
 
 	if (!SelCount)
@@ -679,7 +659,7 @@ bool ShellSetFileAttributes(Panel *SrcPanel,LPCWSTR Object)
 		}
 	}
 
-	FarList NameList={0};
+	FarList NameList{};
 	FARString *strLinks=nullptr;
 
 	{
@@ -708,7 +688,7 @@ bool ShellSetFileAttributes(Panel *SrcPanel,LPCWSTR Object)
 		}
 		fprintf(stderr, "FileMode=%u\n", FileMode);
 
-		if (!SelCount || (SelCount==1 && TestParentFolderName(strSelName)))
+		if (SelCount==1 && TestParentFolderName(strSelName))
 			return false;
 
 		wchar_t DateSeparator=GetDateSeparator();

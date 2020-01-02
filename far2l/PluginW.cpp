@@ -48,6 +48,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "udlist.hpp"
 #include "fileedit.hpp"
 #include "RefreshFrameManager.hpp"
+#include "InterThreadCall.hpp"
 #include "plclass.hpp"
 #include "PluginW.hpp"
 #include "registry.hpp"
@@ -60,6 +61,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "strmix.hpp"
 #include "processname.hpp"
 #include "mix.hpp"
+#include "interf.hpp"
 #include "lasterror.hpp"
 #include "execute.hpp"
 #include "flink.hpp"
@@ -96,6 +98,7 @@ static const wchar_t wszReg_DeleteFiles[]=L"DeleteFilesW";
 static const wchar_t wszReg_MakeDirectory[]=L"MakeDirectoryW";
 static const wchar_t wszReg_ProcessHostFile[]=L"ProcessHostFileW";
 static const wchar_t wszReg_Configure[]=L"ConfigureW";
+static const wchar_t wszReg_MayExitFAR[]=L"MayExitFARW";
 static const wchar_t wszReg_ExitFAR[]=L"ExitFARW";
 static const wchar_t wszReg_ProcessKey[]=L"ProcessKeyW";
 static const wchar_t wszReg_ProcessEvent[]=L"ProcessEventW";
@@ -131,6 +134,7 @@ static const char NFMP_DeleteFiles[]="DeleteFilesW";
 static const char NFMP_MakeDirectory[]="MakeDirectoryW";
 static const char NFMP_ProcessHostFile[]="ProcessHostFileW";
 static const char NFMP_Configure[]="ConfigureW";
+static const char NFMP_MayExitFAR[]="MayExitFARW";
 static const char NFMP_ExitFAR[]="ExitFARW";
 static const char NFMP_ProcessKey[]="ProcessKeyW";
 static const char NFMP_ProcessEvent[]="ProcessEventW";
@@ -182,7 +186,7 @@ static size_t WINAPI FarKeyToName(int Key,wchar_t *KeyText,size_t Size)
 int WINAPI KeyNameToKeyW(const wchar_t *Name)
 {
 	FARString strN(Name);
-	return KeyNameToKey(strN);
+	return (int)KeyNameToKey(strN);
 }
 
 PluginW::PluginW(PluginManager *owner, const wchar_t *lpwszModuleName):
@@ -205,6 +209,8 @@ bool PluginW::LoadFromCache(const FAR_FIND_DATA_EX &FindData)
 	FARString strRegKey;
 	strRegKey.Format(FmtPluginsCache_PluginS, m_strCacheName.CPtr());
 
+	strRegKey += L"/Exports";
+
 	if (CheckRegKey(strRegKey))
 	{
 		if (GetRegKey(strRegKey,wszReg_Preload,0) == 1)   //PF_PRELOAD plugin, skip cache
@@ -223,7 +229,7 @@ bool PluginW::LoadFromCache(const FAR_FIND_DATA_EX &FindData)
 			if (StrCmp(strPluginID, strCurPluginID) )   //одинаковые ли бинарники?
 				return false;
 		}
-		strRegKey += L"/Exports";
+
 		SysID=GetRegKey(strRegKey,wszReg_SysID,0);
 		pOpenPluginW=(PLUGINOPENPLUGINW)(INT_PTR)GetRegKey(strRegKey,wszReg_OpenPlugin,0);
 		pOpenFilePluginW=(PLUGINOPENFILEPLUGINW)(INT_PTR)GetRegKey(strRegKey,wszReg_OpenFilePlugin,0);
@@ -401,6 +407,7 @@ bool PluginW::Load()
 	pSetFindListW=(PLUGINSETFINDLISTW)WINPORT(GetProcAddress)(m_hModule,NFMP_SetFindList);
 	pConfigureW=(PLUGINCONFIGUREW)WINPORT(GetProcAddress)(m_hModule,NFMP_Configure);
 	pExitFARW=(PLUGINEXITFARW)WINPORT(GetProcAddress)(m_hModule,NFMP_ExitFAR);
+	pMayExitFARW=(PLUGINMAYEXITFARW)WINPORT(GetProcAddress)(m_hModule,NFMP_MayExitFAR);
 	pProcessKeyW=(PLUGINPROCESSKEYW)WINPORT(GetProcAddress)(m_hModule,NFMP_ProcessKey);
 	pProcessEventW=(PLUGINPROCESSEVENTW)WINPORT(GetProcAddress)(m_hModule,NFMP_ProcessEvent);
 	pCompareW=(PLUGINCOMPAREW)WINPORT(GetProcAddress)(m_hModule,NFMP_Compare);
@@ -444,16 +451,27 @@ static int WINAPI farExecuteLibraryW(const wchar_t *Library, const wchar_t *Symb
 	return farExecuteLibraryA(Wide2MB(Library).c_str(), Wide2MB(Symbol).c_str(), Wide2MB(CmdStr).c_str(), flags);
 }
 
+static void farDisplayNotificationW(const wchar_t *action, const wchar_t *object)
+{
+	DisplayNotification(action, object);
+}
+
+static int farDispatchInterThreadCallsW()
+{
+	return DispatchInterThreadCalls();
+}
+
 void CreatePluginStartupInfo(Plugin *pPlugin, PluginStartupInfo *PSI, FarStandardFunctions *FSF)
 {
-	static PluginStartupInfo StartupInfo={0};
-	static FarStandardFunctions StandardFunctions={0};
+	static PluginStartupInfo StartupInfo{};
+	static FarStandardFunctions StandardFunctions{};
 
 	// заполняем структуру StandardFunctions один раз!!!
 	if (!StandardFunctions.StructSize)
 	{
 		StandardFunctions.StructSize=sizeof(StandardFunctions);
 		StandardFunctions.snprintf=swprintf;
+		StandardFunctions.BoxSymbols=BoxSymbols;
 		StandardFunctions.sscanf=swscanf;
 		StandardFunctions.qsort=FarQsort;
 		StandardFunctions.qsortex=FarQsortEx;
@@ -502,6 +520,8 @@ void CreatePluginStartupInfo(Plugin *pPlugin, PluginStartupInfo *PSI, FarStandar
 		StandardFunctions.GetCurrentDirectory=farGetCurrentDirectory;
 		StandardFunctions.Execute = farExecuteW;
 		StandardFunctions.ExecuteLibrary = farExecuteLibraryW;
+		StandardFunctions.DisplayNotification = farDisplayNotificationW;
+		StandardFunctions.DispatchInterThreadCalls = farDispatchInterThreadCallsW;
 	}
 
 	if (!StartupInfo.StructSize)
@@ -1301,6 +1321,21 @@ void PluginW::FreeCustomData(wchar_t *CustomData)
 	}
 }
 
+bool PluginW::MayExitFAR()
+{
+
+	if (pMayExitFARW && !ProcessException)
+	{
+		ExecuteStruct es;
+		es.id = EXCEPT_MAYEXITFAR;
+		es.bDefaultResult = 1;
+		EXECUTE_FUNCTION_EX(pMayExitFARW(), es);
+		return es.bResult;
+	}
+
+	return true;
+}
+
 void PluginW::ExitFAR()
 {
 	if (pExitFARW && !ProcessException)
@@ -1314,39 +1349,40 @@ void PluginW::ExitFAR()
 
 void PluginW::ClearExports()
 {
-	pSetStartupInfoW=0;
-	pOpenPluginW=0;
-	pOpenFilePluginW=0;
-	pClosePluginW=0;
-	pGetPluginInfoW=0;
-	pGetOpenPluginInfoW=0;
-	pGetFindDataW=0;
-	pFreeFindDataW=0;
-	pGetVirtualFindDataW=0;
-	pFreeVirtualFindDataW=0;
-	pSetDirectoryW=0;
-	pGetFilesW=0;
-	pPutFilesW=0;
-	pDeleteFilesW=0;
-	pMakeDirectoryW=0;
-	pProcessHostFileW=0;
-	pSetFindListW=0;
-	pConfigureW=0;
-	pExitFARW=0;
-	pProcessKeyW=0;
-	pProcessEventW=0;
-	pCompareW=0;
-	pProcessEditorInputW=0;
-	pProcessEditorEventW=0;
-	pProcessViewerEventW=0;
-	pProcessDialogEventW=0;
-	pProcessSynchroEventW=0;
+	pSetStartupInfoW = nullptr;
+	pOpenPluginW = nullptr;
+	pOpenFilePluginW = nullptr;
+	pClosePluginW = nullptr;
+	pGetPluginInfoW = nullptr;
+	pGetOpenPluginInfoW = nullptr;
+	pGetFindDataW = nullptr;
+	pFreeFindDataW = nullptr;
+	pGetVirtualFindDataW = nullptr;
+	pFreeVirtualFindDataW = nullptr;
+	pSetDirectoryW = nullptr;
+	pGetFilesW = nullptr;
+	pPutFilesW = nullptr;
+	pDeleteFilesW = nullptr;
+	pMakeDirectoryW = nullptr;
+	pProcessHostFileW = nullptr;
+	pSetFindListW = nullptr;
+	pConfigureW = nullptr;
+	pExitFARW = nullptr;
+	pMayExitFARW = nullptr;
+	pProcessKeyW = nullptr;
+	pProcessEventW = nullptr;
+	pCompareW = nullptr;
+	pProcessEditorInputW = nullptr;
+	pProcessEditorEventW = nullptr;
+	pProcessViewerEventW = nullptr;
+	pProcessDialogEventW = nullptr;
+	pProcessSynchroEventW = nullptr;
 #if defined(PROCPLUGINMACROFUNC)
-	pProcessMacroFuncW=0;
+	pProcessMacroFuncW = nullptr;
 #endif
-	pMinFarVersionW=0;
-	pAnalyseW = 0;
-	pGetCustomDataW = 0;
-	pFreeCustomDataW = 0;
+	pMinFarVersionW = nullptr;
+	pAnalyseW = nullptr;
+	pGetCustomDataW = nullptr;
+	pFreeCustomDataW = nullptr;
 }
 

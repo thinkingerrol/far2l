@@ -6,6 +6,18 @@
 #include <fcntl.h>
 #include "ConvertUTF.h"
 #include <errno.h>
+#include <os_call.hpp>
+
+#include <algorithm>
+
+#if __FreeBSD__
+# include <malloc_np.h>
+#elif __APPLE__
+# include <malloc/malloc.h>
+#else
+# include <malloc.h>
+#endif
+
 
 //TODO: Implement convertion according to locale set, but not only UTF8
 //NB: Routines here should not change or preserve result of WINPORT(GetLastError)
@@ -219,7 +231,8 @@ size_t StrStartsFrom(const std::string &haystack, const char *needle)
 	return memcmp(haystack.c_str(), needle, l) ? 0 : l;
 }
 
-std::string EscapeQuotas(std::string str)
+template <class STRING_T>
+	static STRING_T EscapeQuotasT(STRING_T str)
 {
 	for(size_t p = str.find('\"'); p!=std::string::npos; p = str.find('\"', p)) {
 		str.insert(p, 1, '\\');
@@ -227,6 +240,10 @@ std::string EscapeQuotas(std::string str)
 	}
 	return str;
 }
+
+std::string EscapeQuotas(const std::string &str) {return EscapeQuotasT(str); }
+std::wstring EscapeQuotas(const std::wstring &str) {return EscapeQuotasT(str); }
+
 
 std::string EscapeEscapes(std::string str)
 {
@@ -239,17 +256,44 @@ std::string EscapeEscapes(std::string str)
 	}
 	return str;
 }
+
+template <class STRING_T>
+	static void QuoteCmdArgT(STRING_T &str)
+{
+	STRING_T tmp(1, '\"');
+	tmp+= EscapeQuotas(str);
+	tmp+= '\"';
+	str.swap(tmp);
+}
+
+void QuoteCmdArg(std::string &str) { QuoteCmdArgT(str); }
+void QuoteCmdArg(std::wstring &str) { QuoteCmdArgT(str); }
+
+void QuoteCmdArgIfNeed(std::string &str)
+{
+	if (str.find_first_of(" \"\'\r\n\t&|;,()") != std::string::npos) {
+		QuoteCmdArg(str);
+	}
+}
+
+void QuoteCmdArgIfNeed(std::wstring &str)
+{
+	if (str.find_first_of(L" \"\'\r\n\t&|;,()") != std::wstring::npos) {
+		QuoteCmdArg(str);
+	}
+}
 	
 ////////////////////////////////////////////////////////////////
 
 void CheckedCloseFD(int &fd)
 {
-       if (fd!=-1) {
-               if (close(fd) != 0) {
+	int tmp = fd;
+	if (tmp != -1) {
+               fd = -1;
+               if (os_call_int(close, tmp) != 0) {
                        perror("CheckedCloseFD");
                        abort();
                }
-               fd = -1;
        }
 }
 
@@ -257,6 +301,63 @@ void CheckedCloseFDPair(int *fd)
 {
        CheckedCloseFD(fd[0]);
        CheckedCloseFD(fd[1]);
+}
+
+size_t WriteAll(int fd, const void *data, size_t len, size_t chunk)
+{
+	for (size_t ofs = 0; ofs < len; ) {
+		if (chunk == (size_t)-1 || chunk >= len) {
+			chunk = len;
+		}
+		ssize_t written = write(fd, (const char *)data + ofs, chunk);
+		if (written <= 0) {
+			if (errno != EAGAIN && errno != EINTR) {
+				return ofs;
+			}
+		} else {
+			ofs+= std::min((size_t)written, chunk);
+		}
+	}
+	return len;
+}
+
+size_t ReadAll(int fd, void *data, size_t len)
+{
+	for (size_t ofs = 0; ofs < len; ) {
+		ssize_t readed = read(fd, (char *)data + ofs, len - ofs);
+		if (readed <= 0) {
+			if (readed == 0 || (errno != EAGAIN && errno != EINTR)) {
+				return ofs;
+			}
+
+		} else {
+			ofs+= (size_t)readed;
+		}
+	}
+	return len;
+}
+
+ssize_t ReadWritePiece(int fd_src, int fd_dst)
+{
+	char buf[32768];
+	for (;;) {
+		ssize_t r = read(fd_src, buf, sizeof(buf));
+		if (r < 0) {
+			if (errno == EAGAIN || errno == EINTR) {
+				continue;
+			}
+
+			return -1;
+		}
+
+		if (r > 0) {
+			if (WriteAll(fd_dst, buf, (size_t)r) != (size_t)r) {
+				return -1;
+			}
+		}
+
+		return r;
+	}
 }
 
 //////////////
@@ -274,15 +375,15 @@ ErrnoSaver::~ErrnoSaver()
 //////////
 int pipe_cloexec(int pipedes[2])
 {
-#ifdef __APPLE__
-	int r = pipe(pipedes);
+#if defined(__APPLE__) || defined(__CYGWIN__)
+	int r = os_call_int(pipe, pipedes);
 	if (r==0) {
 		fcntl(pipedes[0], F_SETFD, FD_CLOEXEC);
 		fcntl(pipedes[1], F_SETFD, FD_CLOEXEC);
 	}
 	return r;
 #else
-	return pipe2(pipedes, O_CLOEXEC);
+	return os_call_int(pipe2, pipedes, O_CLOEXEC);
 #endif	
 }
 
@@ -306,73 +407,131 @@ bool IsPathIn(const wchar_t *path, const wchar_t *root)
 	return true;
 }
 
-
-template <class C> 
-	static bool TranslateInstallPathT(std::basic_string<C> &path, const C *dir_from, const C *dir_to, const C* prefix)
-{
-	if (!prefix || !*prefix)
-		return false;
-
-	const size_t prefix_len = tzlen(prefix);
-	const size_t dir_from_len = tzlen(dir_from);
-
-	if (path.size() < (prefix_len + dir_from_len))
-		return false;
-
-	if (memcmp(path.c_str(), prefix, prefix_len * sizeof(C)) != 0)
-		return false;
-	
-	if (memcmp(path.c_str() + prefix_len, dir_from, dir_from_len * sizeof(C)) != 0)
-		return false;
-
-	if (path.size() > (prefix_len + dir_from_len) && path[prefix_len + dir_from_len] != GOOD_SLASH)
-		return false;
-
-	path.replace(prefix_len, dir_from_len, dir_to);
-	return true;
-}
-
-static bool TranslateInstallPath(std::wstring &path, const wchar_t *dir_from, const wchar_t *dir_to)
-{
-	return TranslateInstallPathT(path, dir_from, dir_to,GetPathTranslationPrefix());
-}
-
-static bool TranslateInstallPath(std::string &path, const char *dir_from, const char *dir_to)
-{
-	return TranslateInstallPathT(path, dir_from, dir_to, GetPathTranslationPrefixA());
-}
-
-bool TranslateInstallPath_Bin2Share(std::wstring &path)
-{
-	return (TranslateInstallPath(path, L"bin", L"share") || TranslateInstallPath(path, L"sbin", L"share"));
-}
-
-bool TranslateInstallPath_Bin2Share(std::string &path)
-{
-	return (TranslateInstallPath(path, "bin", "share") || TranslateInstallPath(path, "sbin", "share"));
-}
-
-bool TranslateInstallPath_Lib2Share(std::wstring &path)
-{
-	return TranslateInstallPath(path, L"lib", L"share");
-}
-
-bool TranslateInstallPath_Lib2Share(std::string &path)
-{
-	return TranslateInstallPath(path, "lib", "share");
-}
-
-bool TranslateInstallPath_Share2Lib(std::wstring &path)
-{
-	return TranslateInstallPath(path, L"share", L"lib");
-}
-
-bool TranslateInstallPath_Share2Lib(std::string &path)
-{
-	return TranslateInstallPath(path, "share", "lib");
-}
-
 bool isCombinedUTF32(wchar_t c)
 {
 	return c >= 0x0300 && c <= 0x036F;
+}
+
+size_t GetMallocSize(void *p)
+{
+#ifdef _WIN32
+	return _msize(p);
+#elif defined(__APPLE__)
+	return malloc_size(p);
+#else
+	return malloc_usable_size(p);
+#endif
+}
+
+
+void AbbreviateString(std::string &path, size_t needed_length)
+{
+	size_t len = path.size();
+	if (needed_length < 1) {
+		needed_length = 1;
+	}
+	if (len > needed_length) {
+		size_t delta = len - (needed_length - 1);
+		path.replace((path.size() - delta) / 2, delta, "…");//"...");
+	}
+}
+
+const wchar_t *FileSizeToFractionAndUnits(unsigned long long &value)
+{
+	if (value > 100ll * 1024ll * 1024ll * 1024ll * 1024ll) {
+		value = (1024ll * 1024ll * 1024ll * 1024ll);
+		return L"TB";
+	}
+
+	if (value > 100ll * 1024ll * 1024ll * 1024ll) {
+		value = (1024ll * 1024ll * 1024ll);
+		return L"GB";
+	}
+
+	if (value > 100ll * 1024ll * 1024ll ) {
+		value = (1024ll * 1024ll);
+		return L"MB";
+
+	}
+
+	if (value > 100ll * 1024ll ) {
+		value = (1024ll);
+		return L"KB";
+	}
+
+	value = 1;
+	return L"B";
+}
+
+std::wstring ThousandSeparatedString(unsigned long long value)
+{
+	std::wstring str;
+	for (size_t th_sep = 0; value != 0;) {
+		wchar_t digit = L'0' + (value % 10);
+		value/= 10;
+		if (th_sep == 3) {
+			str+= L'`';
+			th_sep = 0;
+		} else {
+			++th_sep;
+		}
+		str+= digit;
+	}
+
+	if (str.empty()) {
+		str = L"0";
+	} else {
+		std::reverse(str.begin(), str.end());
+	}
+	return str;
+}
+
+std::wstring FileSizeString(unsigned long long value)
+{
+	unsigned long long fraction = value;
+	const wchar_t *units = FileSizeToFractionAndUnits(fraction);
+	value/= fraction;
+
+	std::wstring str = ThousandSeparatedString(value);
+	str+= L' ';
+	str+= units;
+	return str;
+}
+
+
+
+#ifdef __CYGWIN__
+extern "C"
+{
+char * itoa(int i, char *a, int radix)
+{
+	switch (radix) {
+		case 10: sprintf(a, "%d", i); break;
+		case 16: sprintf(a, "%x", i); break;
+	}
+	return a;
+}
+}
+#endif
+
+
+unsigned long htoul(const char *str)
+{
+	unsigned long out = 0;
+	for (;;++str) {
+		if (*str >= '0' && *str <= '9') {
+			out<<= 4;
+			out+= *str - '0';
+
+		} else if (*str >= 'a' && *str <= 'f') {
+			out<<= 4;
+			out+= 10 + (*str - 'a');
+
+		} else if (*str >= 'A' && *str <= 'F') {
+			out<<= 4;
+			out+= 10 + (*str - 'A');
+
+		} else
+			return out;
+	}
 }

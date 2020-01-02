@@ -219,12 +219,14 @@ struct VTAnsiState
 		}
 		WINPORT(SetConsoleScrollRegion)(con, scroll_top, scroll_bottom);
 	}
+
 };
 
 static CONSOLE_SCREEN_BUFFER_INFO save_cursor_info = {};
 static VTAnsiState g_saved_state;
 static std::mutex g_vt_ansi_mutex;
-IVTAnsiCommands *g_vt_ansi_commands = nullptr;
+IVTShell *g_vt_shell = nullptr;
+static std::string g_title;
 
 static HANDLE	  hConOut = NULL;		// handle to CONOUT$
 
@@ -242,9 +244,8 @@ static char  suffix;			// escape sequence suffix
 static char  suffix2;			// escape sequence secondary suffix
 static int   es_argc;			// escape sequence args count
 static int   es_argv[MAX_ARG]; 	// escape sequence args
-static char  Pt_arg[MAX_PATH*2];	// text parameter for Operating System Command
-static int   Pt_len;
-static BOOL  shifted;
+static std::string os_cmd_arg;	// text parameter for Operating System Command
+static bool  shifted = false;
 static int   screen_top = -1;		// initial window top when cleared
 static TCHAR blank_character = L' ';
 
@@ -344,7 +345,15 @@ typedef struct {
 	COORD SavePos;	// saved cursor position
 } STATE, *PSTATE;
 
-static STATE ansiState = {0};
+static STATE ansiState{};
+
+static void SetAnsiStateFromAttributes(WORD wAttributes)
+{
+	ansiState.bold = g_saved_state.csbi.wAttributes & FOREGROUND_INTENSITY;
+	ansiState.underline = g_saved_state.csbi.wAttributes & BACKGROUND_INTENSITY;
+	ansiState.foreground = attr2ansi[g_saved_state.csbi.wAttributes & 7];
+	ansiState.background = attr2ansi[(g_saved_state.csbi.wAttributes >> 4) & 7];
+}
 
 
 
@@ -356,6 +365,15 @@ static int   nCharInBuffer;
 static WCHAR ChBuffer[BUFFER_SIZE];
 static WCHAR ChPrev;
 static BOOL  fWrapped;
+
+
+static void ApplyConsoleTitle()
+{
+	std::wstring title(1, L'[');
+	title+= StrMB2Wide(g_title);
+	title+= L']';
+	WINPORT(SetConsoleTitle)(title.c_str() );
+}
 
 //-----------------------------------------------------------------------------
 //   FlushBuffer()
@@ -511,8 +529,8 @@ void SendSequence( const char *seq )
 		return;
 	
 	fprintf(stderr, "VT: SendSequence - '%s'\n", seq);
-	if (g_vt_ansi_commands) {
-		g_vt_ansi_commands->WriteRawInput(seq);
+	if (g_vt_shell) {
+		g_vt_shell->InjectInput(seq);
 		return;
 	}
 
@@ -533,6 +551,112 @@ void SendSequence( const char *seq )
 	DWORD out;
 	WINPORT(WriteConsoleInput)( hStdIn, &irs[0], irs.size(), &out );
 }
+
+
+class AlternativeScreenBuffer
+{
+	bool _enabled = false;
+	struct SavedScreenBuffer : std::vector<CHAR_INFO>
+	{
+		CONSOLE_SCREEN_BUFFER_INFO info;
+		bool valid = false;
+	} _other;
+
+	public:
+
+	void Toggle(bool enable)
+	{
+		if (_enabled == enable)
+			return;
+
+		SavedScreenBuffer tmp;
+		if (!WINPORT(GetConsoleScreenBufferInfo)(NULL, &tmp.info)) {
+			fprintf(stderr, "AlternativeScreenBuffer: csbi failed\n");
+			return;
+		}
+		if (tmp.info.dwSize.Y > 0 && tmp.info.dwSize.X > 0) {
+			tmp.resize((size_t)tmp.info.dwSize.Y * (size_t)tmp.info.dwSize.X);
+			COORD origin = {0, 0};
+			WINPORT(ReadConsoleOutput)(NULL, &tmp[0], tmp.info.dwSize, origin, &tmp.info.srWindow);
+		}
+		tmp.valid = true;
+
+		if (_other.valid) {
+//			WINPORT(SetConsoleWindowInfo)(NULL, TRUE, &_other.info.srWindow);
+			COORD origin = {0, 0}, curpos = _other.info.dwCursorPosition;
+			SMALL_RECT outrect = _other.info.srWindow;
+			if (tmp.info.dwSize.Y < _other.info.dwSize.Y)
+				origin.Y = _other.info.dwSize.Y - tmp.info.dwSize.Y;
+			if (curpos.X >= tmp.info.dwSize.X)
+				curpos.X = (tmp.info.dwSize.X > 0) ? tmp.info.dwSize.X - 1 : 0;
+			if (curpos.X >= tmp.info.dwSize.X)
+				curpos.Y = (tmp.info.dwSize.Y > 0) ? tmp.info.dwSize.Y - 1 : 0;
+
+			WINPORT(WriteConsoleOutput)(NULL, &_other[0], _other.info.dwSize, origin, &outrect);
+
+			// if new screen bigger than saved - fill oversize with emptiness
+			if (tmp.info.dwSize.Y > _other.info.dwSize.Y) {
+				COORD pos = {0, 0};
+				for (pos.Y = _other.info.dwSize.Y + 1; pos.Y <= tmp.info.dwSize.Y; ++pos.Y) {
+					DWORD written = 0;
+					WINPORT(FillConsoleOutputCharacter)(NULL, ' ', tmp.info.dwSize.X, pos, &written);
+				}
+			}
+
+			if (tmp.info.dwSize.X > _other.info.dwSize.X) {
+				COORD pos = { SHORT(tmp.info.srWindow.Left + _other.info.dwSize.X + 1), 0};
+				for (pos.Y = 0; pos.Y <= tmp.info.dwSize.Y; ++pos.Y) {
+					DWORD written = 0;
+					WINPORT(FillConsoleOutputCharacter)(NULL, ' ', tmp.info.dwSize.X - _other.info.dwSize.X, pos, &written);
+				}
+			}
+
+			WINPORT(SetConsoleCursorPosition)(NULL, curpos);
+			WINPORT(SetConsoleTextAttribute)(NULL, _other.info.wAttributes);
+			SetAnsiStateFromAttributes(_other.info.wAttributes);
+//			fprintf(stderr, "AlternativeScreenBuffer: %d {%d, %d}\n", enable, _other.info.dwCursorPosition.X, _other.info.dwCursorPosition.Y);
+		} else {
+			COORD zero_pos = {};
+			DWORD written = 0;
+			WINPORT(FillConsoleOutputCharacter)(NULL, ' ',
+				(DWORD)tmp.info.dwSize.Y * (DWORD)tmp.info.dwSize.X, zero_pos, &written);
+			WINPORT(FillConsoleOutputAttribute)(NULL, g_saved_state.csbi.wAttributes,
+				(DWORD)tmp.info.dwSize.Y * (DWORD)tmp.info.dwSize.X, zero_pos, &written);
+			WINPORT(SetConsoleCursorPosition)(NULL, zero_pos);
+			WINPORT(SetConsoleTextAttribute)(NULL, g_saved_state.csbi.wAttributes);
+			SetAnsiStateFromAttributes(g_saved_state.csbi.wAttributes);
+//			fprintf(stderr, "AlternativeScreenBuffer: %d XXX %x\n", enable, g_saved_state.DefaultAttributes());
+		}
+
+		std::swap(tmp, _other);
+
+		if (enable) {
+			VTLog::Pause();
+		} else {
+			VTLog::Resume();
+		}
+		_enabled = enable;
+	}
+
+	void Reset()
+	{
+		Toggle(false);
+		_other.valid = false;
+	}
+
+} g_alternative_screen_buffer;
+
+
+static void LimitByScrollRegion(SMALL_RECT &rect)
+{
+	SHORT scroll_top = rect.Top, scroll_bottom = rect.Bottom;
+	WINPORT(GetConsoleScrollRegion)(NULL, &scroll_top, &scroll_bottom);
+	if (rect.Top < scroll_top)
+		rect.Top = scroll_top;
+	if (rect.Bottom > scroll_bottom)
+		rect.Bottom = scroll_bottom;
+}
+
 
 // ========== Print functions
 
@@ -562,14 +686,6 @@ void InterpretEscSeq( void )
 	CHAR_INFO  CharInfo;
 	DWORD      mode;
 
-#define WIDTH  Info.dwSize.X
-#define CUR    Info.dwCursorPosition
-#define WIN    Info.srWindow
-#define TOP    WIN.Top
-#define BOTTOM WIN.Bottom
-#define LEFT   0
-#define RIGHT  (WIDTH - 1)
-
 #define FillBlank( len, Pos )  \
 	WINPORT(FillConsoleOutputCharacter)( hConOut, blank_character, len, Pos, &NumberOfCharsWritten );\
 	WINPORT(FillConsoleOutputAttribute)( hConOut, Info.wAttributes, len, Pos, \
@@ -579,6 +695,14 @@ void InterpretEscSeq( void )
 		if (prefix2 == '?' && (suffix == 'h' || suffix == 'l')) {
 			for (i = 0; i < es_argc; ++i) {
 				switch (es_argv[i]) {
+//				case 47: case 1047:
+//					g_alternative_screen_buffer.Toggle(suffix == 'h');
+//					break;
+
+				case 1049:
+					g_alternative_screen_buffer.Toggle(suffix == 'h');
+					break;
+
 				case 25:
 					WINPORT(GetConsoleCursorInfo)( hConOut, &CursInfo );
 					CursInfo.bVisible = (suffix == 'h');
@@ -593,8 +717,8 @@ void InterpretEscSeq( void )
 					break;
 
 				case 1:
-					if (g_vt_ansi_commands)
-						g_vt_ansi_commands->OnKeypadChange((suffix == 'h') ? 1 : 0);
+					if (g_vt_shell)
+						g_vt_shell->OnKeypadChange((suffix == 'h') ? 1 : 0);
 					break;
 
 				default:
@@ -616,9 +740,15 @@ void InterpretEscSeq( void )
 			for (i = 0; i < es_argc; i++) {
 				if (30 <= es_argv[i] && es_argv[i] <= 37) {
 					ansiState.foreground = es_argv[i] - 30;
+				} else if (90 <= es_argv[i] && es_argv[i] <= 97) {
+					ansiState.foreground = es_argv[i] - 90;
+
 				} else if (40 <= es_argv[i] && es_argv[i] <= 47) {
 					ansiState.background = es_argv[i] - 40;
-				} else if (es_argv[i] == 38 || es_argv[i] == 48) {
+				} else if (100 <= es_argv[i] && es_argv[i] <= 107) {
+					ansiState.background = es_argv[i] - 100;
+
+ 				} else if (es_argv[i] == 38 || es_argv[i] == 48) {
 					// This is technically incorrect, but it's what xterm does, so
 					// that's what we do.  According to T.416 (ISO 8613-6), there is
 					// only one parameter, which is divided into elements.  So where
@@ -725,44 +855,44 @@ void InterpretEscSeq( void )
 			if (es_argc != 1) return;
 			switch (es_argv[0]) {
 			case 0:		// ESC[0J erase from cursor to end of display
-				len = (BOTTOM - CUR.Y) * WIDTH + WIDTH - CUR.X;
-				FillBlank( len, CUR );
+				len = (Info.srWindow.Bottom - Info.dwCursorPosition.Y) * Info.dwSize.X + Info.dwSize.X - Info.dwCursorPosition.X;
+				FillBlank( len, Info.dwCursorPosition );
 				return;
 
 			case 1:		// ESC[1J erase from start to cursor.
 				Pos.X = 0;
-				Pos.Y = TOP;
-				len   = (CUR.Y - TOP) * WIDTH + CUR.X + 1;
+				Pos.Y = Info.srWindow.Top;
+				len   = (Info.dwCursorPosition.Y - Info.srWindow.Top) * Info.dwSize.X + Info.dwCursorPosition.X + 1;
 				FillBlank( len, Pos );
 				return;
 
 			case 2:		// ESC[2J Clear screen and home cursor
-				if (TOP != screen_top || BOTTOM == Info.dwSize.Y - 1) {
+				if (Info.srWindow.Top != screen_top || Info.srWindow.Bottom == Info.dwSize.Y - 1) {
 					// Rather than clearing the existing window, make the current
 					// line the new top of the window (assuming this is the first
 					// thing a program does).
-					int range = BOTTOM - TOP;
-					if (CUR.Y + range < Info.dwSize.Y) {
-						TOP = CUR.Y;
-						BOTTOM = TOP + range;
+					int range = Info.srWindow.Bottom - Info.srWindow.Top;
+					if (Info.dwCursorPosition.Y + range < Info.dwSize.Y) {
+						Info.srWindow.Top = Info.dwCursorPosition.Y;
+						Info.srWindow.Bottom = Info.srWindow.Top + range;
 					} else {
-						BOTTOM = Info.dwSize.Y - 1;
-						TOP = BOTTOM - range;
-						Rect.Left = LEFT;
-						Rect.Right = RIGHT;
-						Rect.Top = CUR.Y - TOP;
-						Rect.Bottom = CUR.Y - 1;
+						Info.srWindow.Bottom = Info.dwSize.Y - 1;
+						Info.srWindow.Top = Info.srWindow.Bottom - range;
+						Rect.Left = 0;
+						Rect.Right = (Info.dwSize.X - 1);
+						Rect.Top = Info.dwCursorPosition.Y - Info.srWindow.Top;
+						Rect.Bottom = Info.dwCursorPosition.Y - 1;
 						Pos.X = Pos.Y = 0;
 						CharInfo.Char.UnicodeChar = blank_character;
 						CharInfo.Attributes = Info.wAttributes;
 						WINPORT(ScrollConsoleScreenBuffer)(hConOut, &Rect, NULL, Pos, &CharInfo);
 					}
-					WINPORT(SetConsoleWindowInfo)( hConOut, TRUE, &WIN );
-					screen_top = TOP;
+					WINPORT(SetConsoleWindowInfo)( hConOut, TRUE, &Info.srWindow );
+					screen_top = Info.srWindow.Top;
 				}
-				Pos.X = LEFT;
-				Pos.Y = TOP;
-				len   = (BOTTOM - TOP + 1) * WIDTH;
+				Pos.X = 0;
+				Pos.Y = Info.srWindow.Top;
+				len   = (Info.srWindow.Bottom - Info.srWindow.Top + 1) * Info.dwSize.X;
 				FillBlank( len, Pos );
 				// Not technically correct, but perhaps expected.
 				WINPORT(SetConsoleCursorPosition)( hConOut, Pos );
@@ -777,20 +907,20 @@ void InterpretEscSeq( void )
 			if (es_argc != 1) return;
 			switch (es_argv[0]) {
 			case 0:		// ESC[0K Clear to end of line
-				len = WIDTH - CUR.X;
-				FillBlank( len, CUR );
+				len = Info.dwSize.X - Info.dwCursorPosition.X;
+				FillBlank( len, Info.dwCursorPosition );
 				return;
 
 			case 1:		// ESC[1K Clear from start of line to cursor
-				Pos.X = LEFT;
-				Pos.Y = CUR.Y;
-				FillBlank( CUR.X + 1, Pos );
+				Pos.X = 0;
+				Pos.Y = Info.dwCursorPosition.Y;
+				FillBlank( Info.dwCursorPosition.X + 1, Pos );
 				return;
 
 			case 2:		// ESC[2K Clear whole line.
-				Pos.X = LEFT;
-				Pos.Y = CUR.Y;
-				FillBlank( WIDTH, Pos );
+				Pos.X = 0;
+				Pos.Y = Info.dwCursorPosition.Y;
+				FillBlank( Info.dwSize.X, Pos );
 				return;
 
 			default:
@@ -800,44 +930,46 @@ void InterpretEscSeq( void )
 		case 'X':                 // ESC[#X Erase # characters.
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[X == ESC[1X
 			if (es_argc != 1) return;
-			FillBlank( es_argv[0], CUR );
+			FillBlank( es_argv[0], Info.dwCursorPosition );
 			return;
 
 		case 'L':                 // ESC[#L Insert # blank lines.
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[L == ESC[1L
 			if (es_argc != 1) return;
-			Rect.Left   = WIN.Left	= LEFT;
-			Rect.Right  = WIN.Right = RIGHT;
-			Rect.Top    = CUR.Y;
-			Rect.Bottom = BOTTOM;
-			Pos.X = LEFT;
-			Pos.Y = CUR.Y + es_argv[0];
-			CharInfo.Char.UnicodeChar = blank_character;
-			CharInfo.Attributes = Info.wAttributes;
-			WINPORT(ScrollConsoleScreenBuffer)( hConOut, &Rect, &WIN, Pos, &CharInfo );
-			// Technically should home the cursor, but perhaps not expeclted.
+			{
+				LimitByScrollRegion(Info.srWindow);//fprintf(stderr, "!!!scroll 1\n");
+
+				Rect.Left   = Info.srWindow.Left	= 0;
+				Rect.Right  = Info.srWindow.Right = (Info.dwSize.X - 1);
+				Rect.Top    = Info.dwCursorPosition.Y;
+				Rect.Bottom = Info.srWindow.Bottom;
+
+				Pos.X = 0;
+				Pos.Y = Info.dwCursorPosition.Y + es_argv[0];
+				CharInfo.Char.UnicodeChar = blank_character;
+				CharInfo.Attributes = Info.wAttributes;
+				WINPORT(ScrollConsoleScreenBuffer)( hConOut, &Rect, &Info.srWindow, Pos, &CharInfo );
+				// Technically should home the cursor, but perhaps not expeclted.
+			}
 			return;
 
 		case 'S':                 // ESC[#S Scroll up
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[S == ESC[1S
 			if (es_argc != 1) return;
 			/*while (es_argv[0]--)*/ {
-				
-				SHORT scroll_top = TOP, scroll_bottom = BOTTOM;
-				WINPORT(GetConsoleScrollRegion)(NULL, &scroll_top, &scroll_bottom);
-				
-				Pos.X = Rect.Left;
-				Pos.Y = std::max(TOP, scroll_top);
-				
-				Rect.Left   = LEFT;
-				Rect.Right  = RIGHT;
+				Pos.X = 0;
+				Pos.Y = Info.srWindow.Top;
+
+				LimitByScrollRegion(Info.srWindow);//fprintf(stderr, "!!!scroll 2\n");
+
+				Rect.Left   = Info.srWindow.Left = 0;
+				Rect.Right  = Info.srWindow.Right = (Info.dwSize.X - 1);
 				Rect.Top    = Pos.Y + es_argv[0];
-				Rect.Bottom = std::min(BOTTOM, scroll_bottom);
-				SMALL_RECT clip = {Rect.Left, Pos.Y, Rect.Right, Rect.Bottom};
-			
+				Rect.Bottom = Info.srWindow.Bottom;
+
 				CharInfo.Char.UnicodeChar = blank_character;
 				CharInfo.Attributes = Info.wAttributes;
-				WINPORT(ScrollConsoleScreenBuffer)( hConOut, &Rect, &clip, Pos, &CharInfo );
+				WINPORT(ScrollConsoleScreenBuffer)( hConOut, &Rect, &Info.srWindow, Pos, &CharInfo );
 			}
 			return;
 			
@@ -845,23 +977,19 @@ void InterpretEscSeq( void )
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[T == ESC[1T
 			if (es_argc != 1) return;
 			/*while (es_argv[0]--)*/ {
-				
-				SHORT scroll_top = TOP, scroll_bottom = BOTTOM;
-				WINPORT(GetConsoleScrollRegion)(NULL, &scroll_top, &scroll_bottom);
+				LimitByScrollRegion(Info.srWindow);//fprintf(stderr, "!!!scroll 3\n");
 
-				Rect.Left   = LEFT;
-				Rect.Right  = RIGHT;
-				Rect.Top    = std::max(TOP, scroll_top);
-				Rect.Bottom = std::min(BOTTOM, scroll_bottom) - es_argv[0];
+				Rect.Left   = Info.srWindow.Left = 0;
+				Rect.Right  = Info.srWindow.Right = (Info.dwSize.X - 1);
+				Rect.Top    = Info.srWindow.Top;
+				Rect.Bottom = Info.srWindow.Bottom - es_argv[0];
 				
-				Pos.X = LEFT;
+				Pos.X = 0;
 				Pos.Y = Rect.Top + es_argv[0];
 
-				SMALL_RECT clip = {Rect.Left, Rect.Top, Rect.Right, std::min(BOTTOM, scroll_bottom) };
-				
 				CharInfo.Char.UnicodeChar = blank_character;
 				CharInfo.Attributes = Info.wAttributes;
-				WINPORT(ScrollConsoleScreenBuffer)( hConOut, &Rect, &clip, Pos, &CharInfo );
+				WINPORT(ScrollConsoleScreenBuffer)( hConOut, &Rect, &Info.srWindow, Pos, &CharInfo );
 			}
 			return;
 			
@@ -869,53 +997,59 @@ void InterpretEscSeq( void )
 		case 'M':                 // ESC[#M Delete # lines.
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[M == ESC[1M
 			if (es_argc != 1) return;
-			Rect.Left   = WIN.Left	= LEFT;
-			Rect.Right  = WIN.Right = RIGHT;
-			Rect.Bottom = BOTTOM; BOTTOM-= es_argv[0];
-			Rect.Top    = CUR.Y + es_argv[0];
-			Pos.X = LEFT;
-			Pos.Y = TOP = CUR.Y;
-			CharInfo.Char.UnicodeChar = blank_character;
-			CharInfo.Attributes = Info.wAttributes;
-			WINPORT(ScrollConsoleScreenBuffer)( hConOut, &Rect, &WIN, Pos, &CharInfo );
+			{
+				LimitByScrollRegion(Info.srWindow);//fprintf(stderr, "!!!scroll 4\n");
+
+				Rect.Left   = Info.srWindow.Left	= 0;
+				Rect.Right  = Info.srWindow.Right = (Info.dwSize.X - 1);
+				Rect.Bottom = Info.srWindow.Bottom;
+				Rect.Top    = Info.dwCursorPosition.Y + es_argv[0];
+				Pos.X = 0;
+				Pos.Y = Info.srWindow.Top = Info.dwCursorPosition.Y;
+				CharInfo.Char.UnicodeChar = blank_character;
+				CharInfo.Attributes = Info.wAttributes;
+
+				Info.srWindow.Bottom-= es_argv[0];
+				WINPORT(ScrollConsoleScreenBuffer)( hConOut, &Rect, &Info.srWindow, Pos, &CharInfo );
+			}
 			// Technically should home the cursor, but perhaps not expected.
 			return;
 
 		case 'P':                 // ESC[#P Delete # characters.
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[P == ESC[1P
 			if (es_argc != 1) return;
-			Rect.Left   = WIN.Left	= CUR.X;  Rect.Left+= es_argv[0];
-			Rect.Right  = WIN.Right = RIGHT;
-			Pos.X	    = CUR.X;
+			Rect.Left   = Info.srWindow.Left	= Info.dwCursorPosition.X;  Rect.Left+= es_argv[0];
+			Rect.Right  = Info.srWindow.Right = (Info.dwSize.X - 1);
+			Pos.X	    = Info.dwCursorPosition.X;
 			Pos.Y	    =
 			    Rect.Top    =
-			        Rect.Bottom = CUR.Y;
+			        Rect.Bottom = Info.dwCursorPosition.Y;
 			CharInfo.Char.UnicodeChar = blank_character;
 			CharInfo.Attributes = Info.wAttributes;
-			WINPORT(ScrollConsoleScreenBuffer)( hConOut, &Rect, &WIN, Pos, &CharInfo );
+			WINPORT(ScrollConsoleScreenBuffer)( hConOut, &Rect, &Info.srWindow, Pos, &CharInfo );
 			return;
 
 		case '@':                 // ESC[#@ Insert # blank characters.
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[@ == ESC[1@
 			if (es_argc != 1) return;
-			Rect.Left   = WIN.Left	= CUR.X;
-			Rect.Right  = WIN.Right = RIGHT;
-			Pos.X	    = CUR.X + es_argv[0];
+			Rect.Left   = Info.srWindow.Left	= Info.dwCursorPosition.X;
+			Rect.Right  = Info.srWindow.Right = (Info.dwSize.X - 1);
+			Pos.X	    = Info.dwCursorPosition.X + es_argv[0];
 			Pos.Y	    =
 			    Rect.Top    =
-			        Rect.Bottom = CUR.Y;
+			        Rect.Bottom = Info.dwCursorPosition.Y;
 			CharInfo.Char.UnicodeChar = blank_character;
 			CharInfo.Attributes = Info.wAttributes;
-			WINPORT(ScrollConsoleScreenBuffer)( hConOut, &Rect, &WIN, Pos, &CharInfo );
+			WINPORT(ScrollConsoleScreenBuffer)( hConOut, &Rect, &Info.srWindow, Pos, &CharInfo );
 			return;
 
 		case 'k':                 // ESC[#k
 		case 'A':                 // ESC[#A Moves cursor up # lines
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[A == ESC[1A
 			if (es_argc != 1) return;
-			Pos.Y = CUR.Y - es_argv[0];
-			if (Pos.Y < TOP) Pos.Y = TOP;
-			Pos.X = CUR.X;
+			Pos.Y = Info.dwCursorPosition.Y - es_argv[0];
+			if (Pos.Y < Info.srWindow.Top) Pos.Y = Info.srWindow.Top;
+			Pos.X = Info.dwCursorPosition.X;
 			WINPORT(SetConsoleCursorPosition)( hConOut, Pos );
 			return;
 
@@ -923,9 +1057,9 @@ void InterpretEscSeq( void )
 		case 'B':                 // ESC[#B Moves cursor down # lines
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[B == ESC[1B
 			if (es_argc != 1) return;
-			Pos.Y = CUR.Y + es_argv[0];
-			if (Pos.Y > BOTTOM) Pos.Y = BOTTOM;
-			Pos.X = CUR.X;
+			Pos.Y = Info.dwCursorPosition.Y + es_argv[0];
+			if (Pos.Y > Info.srWindow.Bottom) Pos.Y = Info.srWindow.Bottom;
+			Pos.X = Info.dwCursorPosition.X;
 			WINPORT(SetConsoleCursorPosition)( hConOut, Pos );
 			return;
 
@@ -933,9 +1067,9 @@ void InterpretEscSeq( void )
 		case 'C':                 // ESC[#C Moves cursor forward # spaces
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[C == ESC[1C
 			if (es_argc != 1) return;
-			Pos.X = CUR.X + es_argv[0];
-			if (Pos.X > RIGHT) Pos.X = RIGHT;
-			Pos.Y = CUR.Y;
+			Pos.X = Info.dwCursorPosition.X + es_argv[0];
+			if (Pos.X > (Info.dwSize.X - 1)) Pos.X = (Info.dwSize.X - 1);
+			Pos.Y = Info.dwCursorPosition.Y;
 			WINPORT(SetConsoleCursorPosition)( hConOut, Pos );
 			return;
 
@@ -943,27 +1077,27 @@ void InterpretEscSeq( void )
 		case 'D':                 // ESC[#D Moves cursor back # spaces
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[D == ESC[1D
 			if (es_argc != 1) return;
-			Pos.X = CUR.X - es_argv[0];
-			if (Pos.X < LEFT) Pos.X = LEFT;
-			Pos.Y = CUR.Y;
+			Pos.X = Info.dwCursorPosition.X - es_argv[0];
+			if (Pos.X < 0) Pos.X = 0;
+			Pos.Y = Info.dwCursorPosition.Y;
 			WINPORT(SetConsoleCursorPosition)( hConOut, Pos );
 			return;
 
 		case 'E':                 // ESC[#E Moves cursor down # lines, column 1.
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[E == ESC[1E
 			if (es_argc != 1) return;
-			Pos.Y = CUR.Y + es_argv[0];
-			if (Pos.Y > BOTTOM) Pos.Y = BOTTOM;
-			Pos.X = LEFT;
+			Pos.Y = Info.dwCursorPosition.Y + es_argv[0];
+			if (Pos.Y > Info.srWindow.Bottom) Pos.Y = Info.srWindow.Bottom;
+			Pos.X = 0;
 			WINPORT(SetConsoleCursorPosition)( hConOut, Pos );
 			return;
 
 		case 'F':                 // ESC[#F Moves cursor up # lines, column 1.
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[F == ESC[1F
 			if (es_argc != 1) return;
-			Pos.Y = CUR.Y - es_argv[0];
-			if (Pos.Y < TOP) Pos.Y = TOP;
-			Pos.X = LEFT;
+			Pos.Y = Info.dwCursorPosition.Y - es_argv[0];
+			if (Pos.Y < Info.srWindow.Top) Pos.Y = Info.srWindow.Top;
+			Pos.X = 0;
 			WINPORT(SetConsoleCursorPosition)( hConOut, Pos );
 			return;
 
@@ -972,9 +1106,9 @@ void InterpretEscSeq( void )
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[G == ESC[1G
 			if (es_argc != 1) return;
 			Pos.X = es_argv[0] - 1;
-			if (Pos.X > RIGHT) Pos.X = RIGHT;
-			if (Pos.X < LEFT) Pos.X = LEFT;
-			Pos.Y = CUR.Y;
+			if (Pos.X > (Info.dwSize.X - 1)) Pos.X = (Info.dwSize.X - 1);
+			if (Pos.X < 0) Pos.X = 0;
+			Pos.Y = Info.dwCursorPosition.Y;
 			WINPORT(SetConsoleCursorPosition)( hConOut, Pos );
 			return;
 
@@ -982,9 +1116,9 @@ void InterpretEscSeq( void )
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[d == ESC[1d
 			if (es_argc != 1) return;
 			Pos.Y = es_argv[0] - 1;
-			if (Pos.Y < TOP) Pos.Y = TOP;
-			if (Pos.Y > BOTTOM) Pos.Y = BOTTOM;
-			Pos.X = CUR.X;
+			if (Pos.Y < Info.srWindow.Top) Pos.Y = Info.srWindow.Top;
+			if (Pos.Y > Info.srWindow.Bottom) Pos.Y = Info.srWindow.Bottom;
+			Pos.X = Info.dwCursorPosition.X;
 			WINPORT(SetConsoleCursorPosition)( hConOut, Pos );
 			return;
 
@@ -996,32 +1130,32 @@ void InterpretEscSeq( void )
 				es_argv[es_argc++] = 1; // ESC[#H == ESC[#;1H
 			if (es_argc > 2) return;
 			Pos.X = es_argv[1] - 1;
-			if (Pos.X < LEFT) Pos.X = LEFT;
-			if (Pos.X > RIGHT) Pos.X = RIGHT;
+			if (Pos.X < 0) Pos.X = 0;
+			if (Pos.X > (Info.dwSize.X - 1)) Pos.X = (Info.dwSize.X - 1);
 			Pos.Y = es_argv[0] - 1;
-			if (Pos.Y < TOP) Pos.Y = TOP;
-			if (Pos.Y > BOTTOM) Pos.Y = BOTTOM;
+			if (Pos.Y < Info.srWindow.Top) Pos.Y = Info.srWindow.Top;
+			if (Pos.Y > Info.srWindow.Bottom) Pos.Y = Info.srWindow.Bottom;
 			WINPORT(SetConsoleCursorPosition)( hConOut, Pos );
 			return;
 
 		case 'I':                 // ESC[#I Moves cursor forward # tabs
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[I == ESC[1I
 			if (es_argc != 1) return;
-			Pos.Y = CUR.Y;
-			Pos.X = (CUR.X & -8) + es_argv[0] * 8;
-			if (Pos.X > RIGHT) Pos.X = RIGHT;
+			Pos.Y = Info.dwCursorPosition.Y;
+			Pos.X = (Info.dwCursorPosition.X & -8) + es_argv[0] * 8;
+			if (Pos.X > (Info.dwSize.X - 1)) Pos.X = (Info.dwSize.X - 1);
 			WINPORT(SetConsoleCursorPosition)( hConOut, Pos );
 			return;
 
 		case 'Z':                 // ESC[#Z Moves cursor back # tabs
 			if (es_argc == 0) es_argv[es_argc++] = 1; // ESC[Z == ESC[1Z
 			if (es_argc != 1) return;
-			Pos.Y = CUR.Y;
-			if ((CUR.X & 7) == 0)
-				Pos.X = CUR.X - es_argv[0] * 8;
+			Pos.Y = Info.dwCursorPosition.Y;
+			if ((Info.dwCursorPosition.X & 7) == 0)
+				Pos.X = Info.dwCursorPosition.X - es_argv[0] * 8;
 			else
-				Pos.X = (CUR.X & -8) - (es_argv[0] - 1) * 8;
-			if (Pos.X < LEFT) Pos.X = LEFT;
+				Pos.X = (Info.dwCursorPosition.X & -8) - (es_argv[0] - 1) * 8;
+			if (Pos.X < 0) Pos.X = 0;
 			WINPORT(SetConsoleCursorPosition)( hConOut, Pos );
 			return;
 
@@ -1034,16 +1168,16 @@ void InterpretEscSeq( void )
 
 		case 's':                 // ESC[s Saves cursor position for recall later
 			if (es_argc != 0) return;
-			ansiState.SavePos.X = CUR.X;
-			ansiState.SavePos.Y = CUR.Y - TOP;
+			ansiState.SavePos.X = Info.dwCursorPosition.X;
+			ansiState.SavePos.Y = Info.dwCursorPosition.Y - Info.srWindow.Top;
 			return;
 
 		case 'u':                 // ESC[u Return to saved cursor position
 			if (es_argc != 0) return;
 			Pos.X = ansiState.SavePos.X;
-			Pos.Y = ansiState.SavePos.Y + TOP;
-			if (Pos.X > RIGHT) Pos.X = RIGHT;
-			if (Pos.Y > BOTTOM) Pos.Y = BOTTOM;
+			Pos.Y = ansiState.SavePos.Y + Info.srWindow.Top;
+			if (Pos.X > (Info.dwSize.X - 1)) Pos.X = (Info.dwSize.X - 1);
+			if (Pos.Y > Info.srWindow.Bottom) Pos.Y = Info.srWindow.Bottom;
 			WINPORT(SetConsoleCursorPosition)( hConOut, Pos );
 			return;
 
@@ -1051,12 +1185,12 @@ void InterpretEscSeq( void )
 			if (es_argc != 1) return; // ESC[n == ESC[0n -> ignored
 			switch (es_argv[0]) {
 			case 5:		// ESC[5n Report status
-				SendSequence( "\33[0n" ); // "OK"
+				SendSequence( "\x1b[0n" ); // "OK"
 				return;
 
 			case 6: {	// ESC[6n Report cursor position
 				char buf[64] = {0};
-				sprintf( buf, "\33[%d;%dR", CUR.Y - TOP + 1, CUR.X + 1);
+				sprintf( buf, "\x1b[%d;%dR", Info.dwCursorPosition.Y - Info.srWindow.Top + 1, Info.dwCursorPosition.X + 1);
 				SendSequence( buf );
 			}
 			return;
@@ -1068,15 +1202,13 @@ void InterpretEscSeq( void )
 		case 't':                 // ESC[#t Window manipulation
 			if (es_argc != 1) return;
 			if (es_argv[0] == 21) {	// ESC[21t Report xterm window's title
-				TCHAR buf[MAX_PATH*2] = {0};
-				WINPORT(GetConsoleTitle)( buf, ARRAYSIZE(buf) - 1 );
 				std::string seq;
-				seq.reserve(wcslen(buf) + 8);
+				seq.reserve(g_title.size() + 8);
 				// Too bad if it's too big or fails.
 				seq+= ESC;
 				seq+= ']';
 				seq+= 'l';
-				seq+= Wide2MB(buf);
+				seq+= g_title;
 				seq+= ESC;
 				seq+= '\\';
 				SendSequence( seq.c_str() );
@@ -1098,7 +1230,7 @@ void InterpretEscSeq( void )
 					es_argv[0] = 1;
 			}
 			fprintf(stderr, "VTAnsi: SET SCROLL REGION: %d %d (limits %d %d)\n", 
-				es_argv[0] - 1, es_argv[1] - 1, TOP, BOTTOM);
+				es_argv[0] - 1, es_argv[1] - 1, Info.srWindow.Top, Info.srWindow.Bottom);
 			WINPORT(SetConsoleScrollRegion)(NULL, es_argv[0] - 1, es_argv[1] - 1);
 			return;
 		
@@ -1114,7 +1246,9 @@ void InterpretEscSeq( void )
 
 		if (es_argc == 1 && (es_argv[0] == 0 || // ESC]0;titleST - icon (ignored) &
 		                     es_argv[0] == 2)) { // ESC]2;titleST - window
-			WINPORT(SetConsoleTitle)( MB2Wide(Pt_arg).c_str() );
+			g_title.swap(os_cmd_arg);
+			os_cmd_arg.clear();
+			ApplyConsoleTitle();
 		}
 	}
 }
@@ -1130,14 +1264,20 @@ struct AttrStackEntry
 
 static struct AttrStack : std::vector<AttrStackEntry > {} g_attr_stack;
 
+static bool StrStartsWith(const std::string &str, const char *needle)
+{
+	size_t l = strlen(needle);
+	return (str.size() >= l && memcmp(str.c_str(), needle, l) == 0);
+}
+
 static void InterpretControlString()
 {
 	FlushBuffer();
-	if (prefix == '_' && g_vt_ansi_commands) {//Application Program Command
-		if (strstr(Pt_arg, "set-blank=") == Pt_arg)  {
-			blank_character = Pt_arg[10] ? Pt_arg[10] : L' ';
+	if (prefix == '_') {//Application Program Command
+		if (StrStartsWith(os_cmd_arg, "set-blank="))  {
+			blank_character = (os_cmd_arg.size() > 10) ? os_cmd_arg[10] : L' ';
 
-		} else if (strcmp(Pt_arg, "push-attr") == 0)  {
+		} else if (os_cmd_arg == "push-attr")  {
 			CONSOLE_SCREEN_BUFFER_INFO csbi;
 			if (WINPORT(GetConsoleScreenBufferInfo)( hConOut, &csbi ) ) {
 				g_attr_stack.emplace_back(blank_character, csbi.wAttributes);
@@ -1147,21 +1287,21 @@ static void InterpretControlString()
 				}
 			}
 
-		} else if (strcmp(Pt_arg, "pop-attr") == 0)  {
+		} else if (os_cmd_arg == "pop-attr")  {
 			if (!g_attr_stack.empty()) {
 				blank_character = g_attr_stack.back().blank_character;
+				SetAnsiStateFromAttributes(g_attr_stack.back().attributes);
 				WINPORT(SetConsoleTextAttribute)( hConOut, g_attr_stack.back().attributes );
 				g_attr_stack.pop_back();
 			}
 
-		} else {
-			int r = g_vt_ansi_commands->OnApplicationProtocolCommand(Pt_arg);
-			char reply[64] = {0};
-			sprintf( reply, "%c_%d%c", ESC, r, BEL);
-			SendSequence(reply);
+		} else if (g_vt_shell) {
+			g_vt_shell->OnApplicationProtocolCommand(os_cmd_arg.c_str());
 		}
 	}
-	Pt_len = 0;
+	if (os_cmd_arg.capacity() > 0x1000)
+		os_cmd_arg.shrink_to_fit();
+	os_cmd_arg.clear();
 }
 
 static void PartialLineDown()
@@ -1254,7 +1394,7 @@ void ParseAndPrintString( HANDLE hDev,
 	if (hDev != hConOut) {	// reinit if device has changed
 		hConOut = hDev;
 		state = 1;
-		shifted = FALSE;
+		shifted = false;
 	}
 	for (i = nNumberOfBytesToWrite, s = (LPCWSTR)lpBuffer; i > 0; i--, s++) {
 		if (state == 1) {
@@ -1262,11 +1402,16 @@ void ParseAndPrintString( HANDLE hDev,
 				suffix2 = 0;
 				//get_state();
 				state = (ansiState.crm) ? 7 : 2;
-			} else if (*s == SO) shifted = TRUE;
-			else if (*s == SI) shifted = FALSE;
+			} else if (*s == SO) shifted = true;
+			else if (*s == SI) shifted = false;
 			else PushBuffer( *s );
 		} else if (state == 2) {
 			if (*s == ESC) ;		// \e\e...\e == \e
+			else if (*s == '(' || *s == ')' || *s == '*' || *s == '+') {
+				FlushBuffer();
+				prefix = *s;
+				state = 10;
+			}
 			else if (*s >= '\x20' && *s <= '\x2f')
 				suffix2 = *s;
 			else if (suffix2 != 0)
@@ -1276,15 +1421,15 @@ void ParseAndPrintString( HANDLE hDev,
 				FlushBuffer();
 				prefix = *s;
 				prefix2 = 0;
-				Pt_len = 0;
-				*Pt_arg = '\0';
+				os_cmd_arg.clear();
+				// Pt_len = 0; *Pt_arg = '\0';
 				state = 3;
 			} else if (*s == 'P' ||   // DCS Device Control String
 			           *s == 'X' ||     // SOS Start Of String
 			           *s == '^' ||     // PM  Privacy Message
 			           *s == '_') {     // APC Application Program Command
-				*Pt_arg = '\0';
-				Pt_len = 0;
+				os_cmd_arg.clear();
+				// *Pt_arg = '\0'; Pt_len = 0;
 				prefix = *s;
 				state = 6;
 			} else  {
@@ -1293,9 +1438,12 @@ void ParseAndPrintString( HANDLE hDev,
 					case 'L': PartialLineUp(); break;
 					case 'D': ForwardIndex(); break;
 					case 'M': ReverseIndex(); break;
+					case 'N': shifted = true; break;
+					case 'O': shifted = false; break;
 					case 'C': ResetTerminal(); break;
 					case '7': SaveCursor(); break;
 					case '8': RestoreCursor(); break;
+					default: /*fprintf(stderr, "VTAnsi: state=2 *s=0x%x '%lc'\n", (unsigned int)*s, *s) */ ;
 				}
 				state = 1;
 			}
@@ -1346,13 +1494,22 @@ void ParseAndPrintString( HANDLE hDev,
 		} else if (state == 5 || state == 6) {
 			bool done = false;
 			if ( *s == BEL) {
-				Pt_arg[Pt_len] = '\0';
+				//Pt_arg[Pt_len] = '\0';
 				done = true;
-			} else if (*s == '\\' && Pt_len > 0 && Pt_arg[Pt_len-1] == ESC) {
-				Pt_arg[--Pt_len] = '\0';
+			} else if (*s == '\\' && !os_cmd_arg.empty() && os_cmd_arg[os_cmd_arg.size() - 1] == ESC) {
+				//Pt_arg[--Pt_len] = '\0';
+				os_cmd_arg.resize(os_cmd_arg.size() - 1);
 				done = true;
-			} else if (Pt_len < (int)ARRAYSIZE(Pt_arg)-1)
-				Pt_arg[Pt_len++] = *s;
+			} else try {
+				os_cmd_arg+= *s;
+
+			} catch (std::exception &e) {
+				os_cmd_arg.clear();
+				std::string empty;
+				os_cmd_arg.swap(empty);
+				done = true;
+				fprintf(stderr, "ParseAndPrintString: %s\n", e.what());
+			}
 
 			if (done) {
 				if (state == 6) 
@@ -1386,6 +1543,10 @@ void ParseAndPrintString( HANDLE hDev,
 				PushBuffer( *s );
 			}
 			state = 1;
+
+		} else if (state == 10) {
+			shifted = (*s == '0');
+			state = 1;
 		}
 	}
 	FlushBuffer();
@@ -1408,28 +1569,20 @@ static void ResetState()
 	suffix2 = 0;
 	es_argc = 0;
 	memset(es_argv, 0, sizeof(es_argv));
-	memset(Pt_arg, 0, sizeof(Pt_arg));
-	Pt_len = 0;
-	shifted = 0;
+	os_cmd_arg.clear();
+	//memset(Pt_arg, 0, sizeof(Pt_arg)); Pt_len = 0;
+	shifted = false;
 	screen_top = -1;	
 }
 
 
-static void SetDefaultAnsiState()
-{
-	ansiState.bold = g_saved_state.csbi.wAttributes & FOREGROUND_INTENSITY;
-	ansiState.underline = g_saved_state.csbi.wAttributes & BACKGROUND_INTENSITY;
-	ansiState.foreground = attr2ansi[g_saved_state.csbi.wAttributes & 7];
-	ansiState.background = attr2ansi[(g_saved_state.csbi.wAttributes >> 4) & 7];
-}
-
-VTAnsi::VTAnsi(IVTAnsiCommands *ansi_commands)
+VTAnsi::VTAnsi(IVTShell *vt_shell)
 {
 	g_vt_ansi_mutex.lock();	
-	g_vt_ansi_commands = ansi_commands;
+	g_vt_shell = vt_shell;
 	ResetState();
 	g_saved_state.InitFromConsole(NULL);
-	SetDefaultAnsiState();
+	SetAnsiStateFromAttributes(g_saved_state.csbi.wAttributes);
 	
 	VTLog::Start();
 	
@@ -1441,14 +1594,14 @@ VTAnsi::~VTAnsi()
 	VTLog::Stop();
 	g_saved_state.ApplyToConsole(NULL);
 	WINPORT(FlushConsoleInputBuffer)(NULL);
-	g_vt_ansi_commands = nullptr;
+	g_vt_shell = nullptr;
 	g_vt_ansi_mutex.unlock();
 }
 
 
 struct VTAnsiState *VTAnsi::Suspend()
 {
-	VTAnsiState *out = new VTAnsiState;
+	VTAnsiState *out = new(std::nothrow) VTAnsiState;
 	if (out) {
 		out->InitFromConsole(NULL);
 		g_saved_state.ApplyToConsole(NULL);
@@ -1464,13 +1617,24 @@ void VTAnsi::Resume(struct VTAnsiState* state)
 	delete state;
 }
 
-void VTAnsi::Reset()
+void VTAnsi::OnStart(const char *title)
 {
+	TCHAR buf[MAX_PATH*2] = {0};
+	WINPORT(GetConsoleTitle)( buf, ARRAYSIZE(buf) - 1 );
+	_saved_title = buf;
+	g_title = title;
+	ApplyConsoleTitle();
+}
+
+void VTAnsi::OnStop()
+{
+	g_alternative_screen_buffer.Reset();
 	g_saved_state.ApplyToConsole(NULL, false);
 	ResetState();
-	SetDefaultAnsiState();
+	SetAnsiStateFromAttributes(g_saved_state.csbi.wAttributes);
 	WINPORT(SetConsoleScrollRegion)(NULL, 0, MAXSHORT);
 	_buf.clear();
+	WINPORT(SetConsoleTitle)( _saved_title.c_str());
 }
 
 void VTAnsi::Write(const char *str, size_t len)

@@ -258,7 +258,7 @@ class ConsoleTitle;
 class Dialog: public Frame
 {
 		friend class DlgEdit;
-		friend LONG_PTR WINAPI SendDlgMessage(HANDLE hDlg,int Msg,int Param1,LONG_PTR Param2);
+		friend LONG_PTR SendDlgMessageSynched(HANDLE hDlg,int Msg,int Param1,LONG_PTR Param2);
 		friend LONG_PTR WINAPI DefDlgProc(HANDLE hDlg,int Msg,int Param1,LONG_PTR Param2);
 
 	private:
@@ -335,8 +335,8 @@ class Dialog: public Frame
 		   + Функции программного открытия/закрытия комбобокса и хистори
 		     и получения статуса открытости/закрытости комбобокса и хистори.
 		*/
-		volatile void SetDropDownOpened(int Status) { DropDownOpened=Status; }
-		volatile int GetDropDownOpened() { return DropDownOpened; }
+		void SetDropDownOpened(int Status) { DropDownOpened=Status; }
+		int GetDropDownOpened() { return DropDownOpened; }
 
 		void ProcessCenterGroup();
 		unsigned ProcessRadioButton(unsigned);

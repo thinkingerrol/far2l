@@ -299,7 +299,7 @@ void ConvertPanelModesA(const oldfar::PanelMode *pnmA, PanelMode **ppnmW, int iC
 {
 	if (pnmA && ppnmW && (iCount>0))
 	{
-		PanelMode *pnmW = new PanelMode[iCount]();
+		PanelMode *pnmW = new(std::nothrow) PanelMode[iCount]();
 		if (pnmW)
 		{
 			for (int i=0; i<iCount; i++)
@@ -413,6 +413,9 @@ void ConvertPanelItemA(const oldfar::PluginPanelItem *PanelItemA, PluginPanelIte
 		if (PanelItemA[i].Owner)
 			(*PanelItemW)[i].Owner = AnsiToUnicode(PanelItemA[i].Owner);
 
+		if (PanelItemA[i].Group)
+			(*PanelItemW)[i].Group = AnsiToUnicode(PanelItemA[i].Group);
+
 		if (PanelItemA[i].CustomColumnNumber)
 		{
 			(*PanelItemW)[i].CustomColumnNumber = PanelItemA[i].CustomColumnNumber;
@@ -422,6 +425,7 @@ void ConvertPanelItemA(const oldfar::PluginPanelItem *PanelItemA, PluginPanelIte
 		(*PanelItemW)[i].UserData = PanelItemA[i].UserData;
 		(*PanelItemW)[i].CRC32 = PanelItemA[i].CRC32;
 		(*PanelItemW)[i].FindData.dwFileAttributes = PanelItemA[i].FindData.dwFileAttributes;
+		(*PanelItemW)[i].FindData.dwUnixMode = PanelItemA[i].FindData.dwUnixMode;
 		(*PanelItemW)[i].FindData.ftCreationTime = PanelItemA[i].FindData.ftCreationTime;
 		(*PanelItemW)[i].FindData.ftLastAccessTime = PanelItemA[i].FindData.ftLastAccessTime;
 		(*PanelItemW)[i].FindData.ftLastWriteTime = PanelItemA[i].FindData.ftLastWriteTime;
@@ -441,6 +445,9 @@ void ConvertPanelItemToAnsi(const PluginPanelItem &PanelItem, oldfar::PluginPane
 
 	if (PanelItem.Owner)
 		PanelItemA.Owner=UnicodeToAnsi(PanelItem.Owner);
+
+	if (PanelItem.Group)
+		PanelItemA.Group=UnicodeToAnsi(PanelItem.Group);
 
 	if (PanelItem.CustomColumnNumber)
 	{
@@ -493,6 +500,9 @@ void FreeUnicodePanelItem(PluginPanelItem *PanelItem, int ItemsNumber)
 		if (PanelItem[i].Owner)
 			xf_free((void*)PanelItem[i].Owner);
 
+		if (PanelItem[i].Group)
+			xf_free((void*)PanelItem[i].Group);
+
 		if (PanelItem[i].CustomColumnNumber)
 		{
 			for (int j=0; j<PanelItem[i].CustomColumnNumber; j++)
@@ -516,6 +526,9 @@ void FreePanelItemA(oldfar::PluginPanelItem *PanelItem, int ItemsNumber, bool bF
 
 		if (PanelItem[i].Owner)
 			xf_free(PanelItem[i].Owner);
+
+		if (PanelItem[i].Group)
+			xf_free(PanelItem[i].Group);
 
 		if (PanelItem[i].CustomColumnNumber)
 		{
@@ -945,7 +958,7 @@ struct FAR_SEARCH_A_CALLBACK_PARAM
 static int WINAPI FarRecursiveSearchA_Callback(const FAR_FIND_DATA *FData,const wchar_t *FullName,void *param)
 {
 	FAR_SEARCH_A_CALLBACK_PARAM* pCallbackParam = static_cast<FAR_SEARCH_A_CALLBACK_PARAM*>(param);
-	WIN32_FIND_DATAA FindData={0};
+	WIN32_FIND_DATAA FindData{};
 	FindData.dwFileAttributes = FData->dwFileAttributes;
 	FindData.ftCreationTime = FData->ftCreationTime;
 	FindData.ftLastAccessTime = FData->ftLastAccessTime;
@@ -1061,15 +1074,19 @@ int WINAPI FarMessageFnA(INT_PTR PluginNumber,DWORD Flags,const char *HelpTopic,
 	return ret;
 }
 
+static CriticalSection s_get_msga_cs;
 const char * WINAPI FarGetMsgFnA(INT_PTR PluginHandle,int MsgId)
 {
 	//BUGBUG, надо проверять, что PluginHandle - плагин
 	PluginA *pPlugin = (PluginA*)PluginHandle;
-	FARString strPath = pPlugin->GetModuleName();
+
+	std::wstring strPath = pPlugin->GetModuleName().CPtr();
 	CutToSlash(strPath);
+
+	CriticalSectionLock lock(s_get_msga_cs);
 //	fprintf(stderr,"FarGetMsgFnA: strPath=%ls\n", strPath.CPtr());
 
-	if (!pPlugin->InitLang(strPath)) {
+	if (!pPlugin->InitLang(strPath.c_str())) {
 		return "";
 	}
 
@@ -1853,7 +1870,6 @@ LONG_PTR WINAPI DlgProcA(HANDLE hDlg, int Msg, int Param1, LONG_PTR Param2)
 		case DM_KILLSAVESCREEN: Msg=oldfar::DM_KILLSAVESCREEN; break;
 		case DM_ALLKEYMODE:     Msg=oldfar::DM_ALLKEYMODE; break;
 		case DN_ACTIVATEAPP:    Msg=oldfar::DN_ACTIVATEAPP; break;
-			break;
 		case DN_KEY:
 			Msg=oldfar::DN_KEY;
 			Param2=KeyToOldKey((DWORD)Param2);
@@ -2120,7 +2136,7 @@ LONG_PTR WINAPI FarSendDlgMessageA(HANDLE hDlg, int Msg, int Param1, LONG_PTR Pa
 		}
 		case oldfar::DM_LISTUPDATE:
 		{
-			FarListUpdate newui = {0,0};
+			FarListUpdate newui{};
 
 			if (Param2)
 			{
@@ -2137,7 +2153,7 @@ LONG_PTR WINAPI FarSendDlgMessageA(HANDLE hDlg, int Msg, int Param1, LONG_PTR Pa
 		}
 		case oldfar::DM_LISTINSERT:
 		{
-			FarListInsert newli = {0,0};
+			FarListInsert newli{};
 
 			if (Param2)
 			{
@@ -2402,6 +2418,10 @@ int WINAPI FarDialogExA(INT_PTR PluginNumber,int X1,int Y1,int X2,int Y2,const c
 
 	if (Flags&oldfar::FDLG_NONMODAL)     DlgFlags|=FDLG_NONMODAL;
 
+	if (Flags&oldfar::FDLG_KEEPCONSOLETITLE)     DlgFlags|=FDLG_KEEPCONSOLETITLE;
+
+	if (Flags&oldfar::FDLG_REGULARIDLE)     DlgFlags|=FDLG_REGULARIDLE;
+
 	int ret = -1;
 	HANDLE hDlg = FarDialogInit(PluginNumber, X1, Y1, X2, Y2, (HelpTopic?strHT.CPtr():nullptr), (FarDialogItem *)di, ItemsNumber, 0, DlgFlags, DlgProc?DlgProcA:0, Param);
 	PDialogData NewDialogData=new DialogData;
@@ -2451,13 +2471,23 @@ int WINAPI FarDialogExA(INT_PTR PluginNumber,int X1,int Y1,int X2,int Y2,const c
 		{
 			if (di[i].Type==DI_LISTBOX || di[i].Type==DI_COMBOBOX)
 				di[i].Param.ListItems=CurrentList(hDlg,i);
-
-			FreeUnicodeDialogItem(di[i]);
 		}
 	}
 
-	delete *DialogList.Last();
-	DialogList.Delete(DialogList.Last());
+	for (int i=0; i<ItemsNumber; i++)
+	{
+		FreeUnicodeDialogItem(di[i]);
+	}
+
+	for(PDialogData* i=DialogList.Last();i;i=DialogList.Prev(i))
+	{
+		if((*i)->hDlg==hDlg)
+		{
+			delete *i;
+			DialogList.Delete(i);
+			break;
+		}
+	}
 
 	delete[] diA;
 	delete[] di;
@@ -2549,7 +2579,7 @@ void FreeAnsiPanelInfo(oldfar::PanelInfo* PIA)
 
 int WINAPI FarControlA(HANDLE hPlugin,int Command,void *Param)
 {
-	static oldfar::PanelInfo PanelInfoA={0},AnotherPanelInfoA={0};
+	static oldfar::PanelInfo PanelInfoA{},AnotherPanelInfoA{};
 	static int Reenter=0;
 
 	if (hPlugin==INVALID_HANDLE_VALUE)
@@ -3031,7 +3061,7 @@ INT_PTR WINAPI FarAdvControlA(INT_PTR ModuleNumber,int Command,void *Param)
 		{
 			if (!Param) return FALSE;
 
-			ActlKeyMacro km={0};
+			ActlKeyMacro km{};
 			oldfar::ActlKeyMacro *kmA=(oldfar::ActlKeyMacro *)Param;
 
 			switch (kmA->Command)
@@ -3117,7 +3147,7 @@ INT_PTR WINAPI FarAdvControlA(INT_PTR ModuleNumber,int Command,void *Param)
 		{
 			if (!Param) return FALSE;
 
-			KeySequence ks;
+			KeySequence ks{};
 			oldfar::KeySequence *ksA = (oldfar::KeySequence*)Param;
 
 			if (!ksA->Count || !ksA->Sequence) return FALSE;
@@ -3147,7 +3177,8 @@ INT_PTR WINAPI FarAdvControlA(INT_PTR ModuleNumber,int Command,void *Param)
 
 			int cmd = (Command==oldfar::ACTL_GETWINDOWINFO)?ACTL_GETWINDOWINFO:ACTL_GETSHORTWINDOWINFO;
 			oldfar::WindowInfo *wiA = (oldfar::WindowInfo *)Param;
-			WindowInfo wi={wiA->Pos};
+			WindowInfo wi{};
+			wi.Pos = wiA->Pos;
 			INT_PTR ret = FarAdvControl(ModuleNumber, cmd, &wi);
 
 			if (ret)
@@ -3352,7 +3383,7 @@ INT_PTR WINAPI FarAdvControlA(INT_PTR ModuleNumber,int Command,void *Param)
 
 			if (ds&oldfar::FDIS_HISTORYINDIALOGEDITCONTROLS)    ret|=FDIS_HISTORYINDIALOGEDITCONTROLS;
 
-			if (ds&oldfar::FDIS_HISTORYINDIALOGEDITCONTROLS)    ret|=FDIS_HISTORYINDIALOGEDITCONTROLS;
+			if (ds&oldfar::FDIS_AUTOCOMPLETEININPUTLINES)    ret|=FDIS_AUTOCOMPLETEININPUTLINES;
 
 			if (ds&oldfar::FDIS_PERSISTENTBLOCKSINEDITCONTROLS) ret|=FDIS_PERSISTENTBLOCKSINEDITCONTROLS;
 
@@ -3373,7 +3404,7 @@ INT_PTR WINAPI FarAdvControlA(INT_PTR ModuleNumber,int Command,void *Param)
 
 UINT GetEditorCodePageA()
 {
-	EditorInfo info={0};
+	EditorInfo info{};
 	FarEditorControl(ECTL_GETINFO,&info);
 	UINT CodePage=info.CodePage;
 	CPINFO cpi;
@@ -3548,7 +3579,7 @@ int WINAPI FarEditorControlA(int Command,void* Param)
 		}
 		case oldfar::ECTL_GETINFO:
 		{
-			EditorInfo ei={0};
+			EditorInfo ei{};
 			oldfar::EditorInfo *oei=(oldfar::EditorInfo *)Param;
 
 			if (!oei)
@@ -3609,12 +3640,12 @@ int WINAPI FarEditorControlA(int Command,void* Param)
 		}
 		case oldfar::ECTL_SAVEFILE:
 		{
-			EditorSaveFile newsf = {0,0};
+			EditorSaveFile newsf{};
 
 			if (Param)
 			{
 				oldfar::EditorSaveFile *oldsf = (oldfar::EditorSaveFile*) Param;
-				newsf.FileName=(oldsf->FileName)?AnsiToUnicode(oldsf->FileName):nullptr;
+				newsf.FileName=AnsiToUnicode(oldsf->FileName);
 				newsf.FileEOL=(oldsf->FileEOL)?AnsiToUnicode(oldsf->FileEOL):nullptr;
 			}
 
@@ -3708,7 +3739,7 @@ int WINAPI FarEditorControlA(int Command,void* Param)
 		}
 		case oldfar::ECTL_SETPARAM:
 		{
-			EditorSetParameter newsp = {0,0,0,0};
+			EditorSetParameter newsp{};
 
 			if (Param)
 			{

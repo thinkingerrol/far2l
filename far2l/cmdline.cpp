@@ -70,7 +70,8 @@ CommandLine::CommandLine():
 	CmdStr(CtrlObject->Cp(),0,true,CtrlObject->CmdHistory,0,(Opt.CmdLine.AutoComplete?EditControl::EC_ENABLEAUTOCOMPLETE:0)|EditControl::EC_ENABLEFNCOMPLETE),
 	BackgroundScreen(nullptr),
 	LastCmdPartLength(-1),
-	LastKey(0)
+	LastKey(0),
+	PushDirStackSize(0)
 {
 	CmdStr.SetEditBeyondEnd(FALSE);
 	SetPersistentBlocks(Opt.CmdLine.EditBlock);
@@ -162,12 +163,19 @@ void CommandLine::ProcessCompletion(bool possibilities)
 		VTCompletor vtc;		
 		if (possibilities) {
 			std::vector<std::string>  possibilities;
+			std::string last_cmd_word = cmd;
+			size_t last_space = last_cmd_word.rfind(' ');
+			if (last_space != std::string::npos)
+				last_cmd_word.erase(0, last_space + 1);
 			if (vtc.GetPossibilities(cmd, possibilities) && !possibilities.empty()) {
 				std::sort(possibilities.begin(), possibilities.end());
 				fprintf(stderr, "Possibilities: ");
 				for(auto &p : possibilities) {
 					fprintf(stderr, "%s ", p.c_str());
-					if (p.find(cmd)!=0) {
+					if (!last_cmd_word.empty() && p.find(last_cmd_word) == 0) {
+						p.insert(0, cmd.substr(0, cmd.size() - last_cmd_word.size()));
+
+					} else if (p.find(cmd) != 0) {
 						/*if (p.find(' ') != 0 && !cmd.empty() && cmd[cmd.size()-1]!=' ') {
 							p.insert(0, 1, ' ');
 						}*/
@@ -239,7 +247,16 @@ int CommandLine::ProcessKey(int Key)
 	}
 	
 	if ( Key==KEY_F8) { 
-		CmdExecute(L"reset", true, false, true, false, false, false);
+		ClearScreen(COL_COMMANDLINEUSERSCREEN);
+		SaveBackground();
+		VTLog::Reset();
+		ShowBackground();
+		Redraw();
+//		ShellUpdatePanels(CtrlObject->Cp()->ActivePanel, FALSE);
+		if (Opt.ShowKeyBar)
+			CtrlObject->MainKeyBar->Show();
+
+//		CmdExecute(L"reset", true, false, true, false, false, false);
 		return TRUE;
 	}	
 		
@@ -467,8 +484,17 @@ int CommandLine::ProcessKey(int Key)
 
 			ProcessOSAliases(strStr);
 
-			if (!ActivePanel->ProcessPluginEvent(FE_COMMAND,(void *)strStr.CPtr()))
+			if (ActivePanel->ProcessPluginEvent(FE_COMMAND,(void *)strStr.CPtr())) {
+				FARString strCurDirFromPanel;
+				ActivePanel->GetCurDirPluginAware(strCurDirFromPanel);
+				strCurDir = strCurDirFromPanel;
+				Show();
+				ActivePanel->SetTitle();
+
+			} else {
 				CmdExecute(strStr, false, Key==KEY_SHIFTENTER||Key==KEY_SHIFTNUMENTER, false, false, false, Key == KEY_CTRLALTENTER || Key == KEY_CTRLALTNUMENTER);
+			}
+
 		}
 		return TRUE;
 		case KEY_CTRLU:
@@ -658,13 +684,11 @@ void CommandLine::GetPrompt(FARString &strDestStr)
 							*/
 						case L'+': // $+  - Отображение нужного числа знаков плюс (+) в зависимости от текущей глубины стека каталогов PUSHD, по одному знаку на каждый сохраненный путь.
 						{
-							DWORD ppstacksize=ppstack.size();
-
-							if (ppstacksize)
+							if (PushDirStackSize)
 							{
-								wchar_t * p = strDestStr.GetBuffer(strDestStr.GetLength()+ppstacksize+1);
-								wmemset(p + strDestStr.GetLength(),L'+',ppstacksize);
-								strDestStr.ReleaseBuffer(strDestStr.GetLength()+ppstacksize);
+								wchar_t * p = strDestStr.GetBuffer(strDestStr.GetLength()+PushDirStackSize+1);
+								wmemset(p + strDestStr.GetLength(),L'+',PushDirStackSize);
+								strDestStr.ReleaseBuffer(strDestStr.GetLength()+PushDirStackSize);
 							}
 
 							break;

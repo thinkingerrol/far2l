@@ -802,6 +802,26 @@ int64_t Editor::VMProcess(int OpCode,void *vParam,int64_t iParam)
 	return 0;
 }
 
+void Editor::ProcessPasteEvent()
+{
+	if (Flags.Check(FEDITOR_LOCKMODE))
+		return;
+
+	Pasting++;
+	if (!EdOpt.PersistentBlocks && !VBlockStart)
+		DeleteBlock();
+
+	Paste();
+	// MarkingBlock=!VBlockStart;
+	Flags.Change(FEDITOR_MARKINGBLOCK,!VBlockStart);
+	Flags.Clear(FEDITOR_MARKINGVBLOCK);
+
+	if (!EdOpt.PersistentBlocks)
+		UnmarkBlock();
+
+	Pasting--;
+	Show();
+}
 
 int Editor::ProcessKey(int Key)
 {
@@ -1365,12 +1385,8 @@ int Editor::ProcessKey(int Key)
 			else //расширяем выделение
 			{
 				CurLine->Select(SelStart,-1);
-				SelStart=0;
-				SelEnd=CurPos;
-
-				if (SelStart!=-1)SelStart=CurLine->m_next->TabPosToReal(SelStart);
-
-				if (SelEnd!=-1)SelEnd=CurLine->m_next->TabPosToReal(SelEnd);
+				SelStart=CurLine->m_next->TabPosToReal(0);
+				SelEnd=CurLine->m_next->TabPosToReal(CurPos);
 			}
 
 			if (!EdOpt.CursorBeyondEOL && SelEnd > CurLine->m_next->GetLength())
@@ -1560,24 +1576,7 @@ int Editor::ProcessKey(int Key)
 		case KEY_CTRLV:
 		case KEY_SHIFTINS: case KEY_SHIFTNUMPAD0:
 		{
-			if (Flags.Check(FEDITOR_LOCKMODE))
-				return TRUE;
-
-			Pasting++;
-
-			if (!EdOpt.PersistentBlocks && !VBlockStart)
-				DeleteBlock();
-
-			Paste();
-			// MarkingBlock=!VBlockStart;
-			Flags.Change(FEDITOR_MARKINGBLOCK,!VBlockStart);
-			Flags.Clear(FEDITOR_MARKINGVBLOCK);
-
-			if (!EdOpt.PersistentBlocks)
-				UnmarkBlock();
-
-			Pasting--;
-			Show();
+			ProcessPasteEvent();
 			return TRUE;
 		}
 		case KEY_LEFT: case KEY_NUMPAD4:
@@ -2474,6 +2473,7 @@ int Editor::ProcessKey(int Key)
 			if (!Flags.Check(FEDITOR_LOCKMODE))
 			{
 				Pasting++;
+				AddUndoData(UNDO_BEGIN);
 				TextChanged(1);
 
 				if (!EdOpt.PersistentBlocks && BlockStart)
@@ -2485,6 +2485,7 @@ int Editor::ProcessKey(int Key)
 				AddUndoData(UNDO_EDIT,CurLine->GetStringAddr(),CurLine->GetEOL(),NumLine,CurLine->GetCurPos(),CurLine->GetLength());
 				CurLine->ProcessKey(Key);
 				Pasting--;
+				AddUndoData(UNDO_END);
 				Show();
 			}
 
@@ -2737,6 +2738,7 @@ int Editor::ProcessKey(int Key)
 				{
 					Xlat();
 					Show();
+					delete[] CmpStr;
 					return TRUE;
 				}
 
@@ -2937,6 +2939,12 @@ int Editor::ProcessMouse(MOUSE_EVENT_RECORD *MouseEvent)
 		}
 
 		Show();
+	}
+
+	if (MouseEvent->dwButtonState == FROM_LEFT_2ND_BUTTON_PRESSED
+	&& (MouseEvent->dwEventFlags & (DOUBLE_CLICK | MOUSE_MOVED | MOUSE_HWHEELED | MOUSE_WHEELED)) == 0)
+	{
+		ProcessPasteEvent();
 	}
 
 	if (CurLine->ProcessMouse(MouseEvent))
@@ -6709,7 +6717,7 @@ void Editor::PR_EditorShowMsg()
 
 Edit *Editor::CreateString(const wchar_t *lpwszStr, int nLength)
 {
-	Edit *pEdit = new Edit(this, nullptr, lpwszStr ? false : true);
+	Edit *pEdit = new(std::nothrow) Edit(this, nullptr, lpwszStr ? false : true);
 
 	if (pEdit)
 	{

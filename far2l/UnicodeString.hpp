@@ -211,6 +211,10 @@ class UnicodeString
 		bool operator==(const wchar_t* Str) const { return Equal(0, GetLength(), Str, StrLength(Str)); }
 		bool operator==(wchar_t Ch) const { return Equal(0, GetLength(), &Ch, 1); }
 
+		bool operator!=(const UnicodeString& Str) const { return !Equal(0, GetLength(), Str.CPtr(), Str.GetLength()); }
+		bool operator!=(const wchar_t* Str) const { return !Equal(0, GetLength(), Str, StrLength(Str)); }
+		bool operator!=(wchar_t Ch) const { return !Equal(0, GetLength(), &Ch, 1); }
+
 		UnicodeString& Lower(size_t nStartPos=0, size_t nLength=(size_t)-1);
 		UnicodeString& Upper(size_t nStartPos=0, size_t nLength=(size_t)-1);
 
@@ -221,6 +225,9 @@ class UnicodeString
 
 		bool Contains(wchar_t Ch, size_t nStartPos=0) const { return !wcschr(m_pData->GetData()+nStartPos,Ch) ? false : true; }
 		bool Contains(const wchar_t *lpwszFind, size_t nStartPos=0) const { return !wcsstr(m_pData->GetData()+nStartPos,lpwszFind) ? false : true; }
+
+		bool Begins(wchar_t Ch) const { return m_pData->GetLength() > 0 && *m_pData->GetData() == Ch; }
+		bool Begins(const wchar_t *lpwszFind) const { return m_pData->GetLength() > 0 && wcsncmp(m_pData->GetData(), lpwszFind, wcslen(lpwszFind)) == 0; }
 };
 
 typedef UnicodeString FARString;

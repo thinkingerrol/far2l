@@ -6,17 +6,21 @@
 #include <fcntl.h>
 #include <string.h>
 #include <sys/stat.h>
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
   #include <sys/mount.h>
 #else
   #include <sys/statfs.h>
   #include <sys/ioctl.h>
-  #include <linux/fs.h>
+#  if !defined(__CYGWIN__)
+#   include <linux/fs.h>
+#  endif
 #endif
 #include <sys/statvfs.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <sys/xattr.h>
+#ifndef __FreeBSD__
+# include <sys/xattr.h>
+#endif
 #include <set>
 #include <vector>
 #include <mutex>
@@ -148,6 +152,47 @@ namespace Sudo
 		std::vector<char> buf(count + 1);
 		
 		ssize_t r = g_fds.Check(fd) ? read(fd, &buf[0], count) : -1;
+		bt.SendPOD(r);
+		if (r==-1) {
+			bt.SendErrno();
+		} else if (r > 0) {
+			bt.SendBuf(&buf[0], r);
+		}
+	}
+	
+	static void OnSudoDispatch_PWrite(BaseTransaction &bt)
+	{		
+		int fd;
+		off_t offset;
+		size_t count;
+
+		bt.RecvPOD(fd);
+		bt.RecvPOD(offset);
+		bt.RecvPOD(count);
+		
+		std::vector<char> buf(count + 1);
+		if (count)
+			bt.RecvBuf(&buf[0], count);
+		
+		ssize_t r = g_fds.Check(fd) ? pwrite(fd, &buf[0], count, offset) : -1;
+		bt.SendPOD(r);
+		if (r==-1)
+			bt.SendErrno();
+	}
+	
+	static void OnSudoDispatch_PRead(BaseTransaction &bt)
+	{
+		int fd;
+		off_t offset;
+		size_t count;
+
+		bt.RecvPOD(fd);
+		bt.RecvPOD(offset);
+		bt.RecvPOD(count);
+		
+		std::vector<char> buf(count + 1);
+		
+		ssize_t r = g_fds.Check(fd) ? pread(fd, &buf[0], count, offset) : -1;
 		bt.SendPOD(r);
 		if (r==-1) {
 			bt.SendErrno();
@@ -387,6 +432,9 @@ namespace Sudo
 	
 	static void OnSudoDispatch_FListXAttr(BaseTransaction &bt)
 	{
+#ifdef __FreeBSD__
+		return;
+#else
 		int fd;
 		size_t size;
 		bt.RecvPOD(fd);
@@ -403,10 +451,14 @@ namespace Sudo
 			bt.SendBuf(&buf[0], r);
 		} else if (r < 0)
 			bt.SendErrno();
+#endif
 	}
 
 	static void OnSudoDispatch_FGetXAttr(BaseTransaction &bt)
 	{
+#ifdef __FreeBSD__
+		return;
+#else
 		int fd;
 		std::string name;
 		size_t size;
@@ -424,10 +476,14 @@ namespace Sudo
 			bt.SendBuf(&buf[0], r);
 		} else if (r < 0)
 			bt.SendErrno();
+#endif
 	}
 			
 	static void OnSudoDispatch_FSetXAttr(BaseTransaction &bt)
 	{
+#ifdef __FreeBSD__
+		return;
+#else
 		int fd;
 		std::string name;
 		size_t size;
@@ -448,18 +504,19 @@ namespace Sudo
 		bt.SendPOD(r);
 		if (r == -1 )
 			bt.SendErrno();
+#endif
 	}
 	
 	static void OnSudoDispatch_FSFlagsGet(BaseTransaction &bt)
 	{
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__CYGWIN__)
 		std::string path;
 		bt.RecvStr(path);
 		int r = -1;
 		int fd = open(path.c_str(), O_RDONLY);
 		if (fd != -1) {
 			int flags = 0;
-			r = ioctl(fd, FS_IOC_GETFLAGS, &flags);
+			r = bugaware_ioctl_pint(fd, FS_IOC_GETFLAGS, &flags);
 			close(fd);
 			if (r == 0) {
 				bt.SendInt(0);
@@ -474,7 +531,7 @@ namespace Sudo
 	
 	static void OnSudoDispatch_FSFlagsSet(BaseTransaction &bt)
 	{
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__CYGWIN__)
 		std::string path;
 		bt.RecvStr(path);
 		int flags = bt.RecvInt();
@@ -482,7 +539,7 @@ namespace Sudo
 		int r = -1;
 		int fd = open(path.c_str(), O_RDONLY);
 		if (fd != -1) {
-			r = ioctl(fd, FS_IOC_SETFLAGS, &flags);
+			r = bugaware_ioctl_pint(fd, FS_IOC_SETFLAGS, &flags);
 			close(fd);
 			if (r == 0) {
 				bt.SendInt(0);
@@ -523,6 +580,14 @@ namespace Sudo
 			
 			case SUDO_CMD_READ:
 				OnSudoDispatch_Read(bt);
+				break;
+
+			case SUDO_CMD_PWRITE:
+				OnSudoDispatch_PWrite(bt);
+				break;
+			
+			case SUDO_CMD_PREAD:
+				OnSudoDispatch_PRead(bt);
 				break;
 				
 			case SUDO_CMD_STATFS:

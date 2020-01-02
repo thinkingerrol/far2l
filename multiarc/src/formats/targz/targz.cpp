@@ -264,6 +264,8 @@ int GetArcItemGZIP(struct PluginPanelItem *Item,struct ArcItemInfo *Info)
     BYTE HostOS;
   } Header;
 
+  Item->FindData.cFileName[0] = 0;
+
   if (!WINPORT(ReadFile)(ArcHandle,&Header,sizeof(Header),&ReadSize,NULL))
     return(GETARC_READERROR);
 
@@ -279,12 +281,12 @@ int GetArcItemGZIP(struct PluginPanelItem *Item,struct ArcItemInfo *Info)
     return(GETARC_SUCCESS);
   }
 
-  if (Header.Flags & 2)
+  if (Header.Flags & 2) // skip CRC16
     WINPORT(SetFilePointer)(ArcHandle,2,NULL,FILE_CURRENT);
 
-  if (Header.Flags & 4)
+  if (Header.Flags & 4) // skip FEXTRA
   {
-    DWORD ExtraLength;
+    WORD ExtraLength = 0;
     if (!WINPORT(ReadFile)(ArcHandle,&ExtraLength,sizeof(ExtraLength),&ReadSize,NULL))
       return(GETARC_READERROR);
     WINPORT(SetFilePointer)(ArcHandle,ExtraLength,NULL,FILE_CURRENT);
@@ -294,8 +296,19 @@ int GetArcItemGZIP(struct PluginPanelItem *Item,struct ArcItemInfo *Info)
     if (!WINPORT(ReadFile)(ArcHandle,Item->FindData.cFileName,sizeof(Item->FindData.cFileName),&ReadSize,NULL))
       return(GETARC_READERROR);
 
-  if (*Item->FindData.cFileName==0)
-    strcpy(Item->FindData.cFileName,ZipName);
+  if (*Item->FindData.cFileName == 0) {
+    strncpy(Item->FindData.cFileName, ZipName, sizeof(Item->FindData.cFileName) );
+
+  } else { // workaround for tar.gz archives that has original name set but without .tar extension
+           // since tar archives detection relies on extension, it should be there (#173)
+    const char *ZipExt = strrchr(ZipName, '.');
+    if (ZipExt && strcasecmp(ZipExt, ".tar") == 0) {
+        const char *OrigExt = strrchr(Item->FindData.cFileName, '.');
+        if (!OrigExt || strcasecmp(OrigExt, ZipExt) != 0) {
+          strncat(Item->FindData.cFileName, ZipExt, sizeof(Item->FindData.cFileName));
+      }
+    }
+  }
 
   *ZipName=0;
 
@@ -318,6 +331,7 @@ int GetArcItemTAR(struct PluginPanelItem *Item,struct ArcItemInfo *Info)
   DWORD ReadSize;
   BOOL SkipItem=FALSE;
   char *LongName = NULL;
+  char namebuf[sizeof(TAR_hdr.header.prefix) + 1 + sizeof(TAR_hdr.header.name) + 1];
   do
   {
     NextPosition.Part.LowPart=WINPORT(SetFilePointer)(ArcHandle,NextPosition.Part.LowPart,&NextPosition.Part.HighPart,FILE_BEGIN);
@@ -334,6 +348,7 @@ int GetArcItemTAR(struct PluginPanelItem *Item,struct ArcItemInfo *Info)
     if (ReadSize==0 || *TAR_hdr.header.name==0)
       return(GETARC_EOF);
 
+//    fprintf(stderr, "TAR_hdr.header.typeflag='%c' %x size=%s\n", TAR_hdr.header.typeflag, TAR_hdr.header.typeflag, TAR_hdr.header.size);
     if (TAR_hdr.header.typeflag == GNUTYPE_LONGLINK || TAR_hdr.header.typeflag == GNUTYPE_LONGNAME)
     {
       SkipItem=TRUE;
@@ -341,14 +356,15 @@ int GetArcItemTAR(struct PluginPanelItem *Item,struct ArcItemInfo *Info)
     else
     {
       // TODO: GNUTYPE_LONGLINK
-      DWORD dwAddFileAttr=0;
+      DWORD dwUnixMode = 0;
       SkipItem=FALSE;
       char *EndPos;
       if (LongName != NULL)
+      {
         EndPos = AdjustTARFileName (LongName);
+      }
       else
       {
-        char namebuf[sizeof(TAR_hdr.header.prefix) + 1 + sizeof(TAR_hdr.header.name) + 1];
         char *np = namebuf;
         if(TAR_hdr.header.prefix[0])
         {
@@ -359,24 +375,43 @@ int GetArcItemTAR(struct PluginPanelItem *Item,struct ArcItemInfo *Info)
         }
         memcpy (np, TAR_hdr.header.name, sizeof(TAR_hdr.header.name));
         np[sizeof(TAR_hdr.header.name)] = '\0';
-        EndPos = AdjustTARFileName (namebuf);
+        EndPos = AdjustTARFileName(namebuf);
       }
-      strncpy(Item->FindData.cFileName,EndPos,sizeof(Item->FindData.cFileName));
+      strncpy(Item->FindData.cFileName, EndPos, sizeof(Item->FindData.cFileName));
       Item->FindData.nFileSizeHigh=0;
-      if(((DWORD)GetOctal(TAR_hdr.header.mode) & 0x4000) || ((TAR_hdr.header.typeflag-'0') & 4))
-         dwAddFileAttr|=FILE_ATTRIBUTE_DIRECTORY;
+      dwUnixMode = (DWORD)GetOctal(TAR_hdr.header.mode);
+      switch (TAR_hdr.header.typeflag) {
+        case REGTYPE: case AREGTYPE:
+          dwUnixMode|= S_IFREG;
+          break;
 
-      if(TAR_hdr.header.typeflag == SYMTYPE || TAR_hdr.header.typeflag == LNKTYPE)
-      {
-        if(TAR_hdr.header.typeflag == SYMTYPE)
-        {
-          #ifndef IO_REPARSE_TAG_SYMLINK
-            #define IO_REPARSE_TAG_SYMLINK 0xA000000C
-          #endif
-          dwAddFileAttr|=FILE_ATTRIBUTE_REPARSE_POINT;
+        case SYMTYPE:
           Item->FindData.dwReserved0=IO_REPARSE_TAG_SYMLINK;
-        }
+          //fallthrough
 
+        case LNKTYPE:
+          dwUnixMode|= S_IFLNK;
+          break;
+
+        case CHRTYPE:
+          dwUnixMode|= S_IFCHR;
+          break;
+
+        case BLKTYPE:
+          dwUnixMode|= S_IFBLK;
+          break;
+
+        case FIFOTYPE:
+          dwUnixMode|= S_IFIFO;
+          break;
+
+        case DIRTYPE:
+          dwUnixMode|= S_IFDIR;
+          break;
+      }
+
+      if ((dwUnixMode & S_IFMT) == S_IFLNK) //TAR_hdr.header.typeflag == SYMTYPE || TAR_hdr.header.typeflag == LNKTYPE
+      {
         if((Item->UserData=(DWORD_PTR)MA_malloc(strlen(TAR_hdr.header.linkname)+2)) != 0)
         {
           EndPos = AdjustTARFileName (TAR_hdr.header.linkname);
@@ -386,12 +421,15 @@ int GetArcItemTAR(struct PluginPanelItem *Item,struct ArcItemInfo *Info)
         }
       }
 
-      Item->FindData.dwFileAttributes=dwAddFileAttr;
+      Item->FindData.dwFileAttributes=WINPORT(EvaluateAttributesA)(dwUnixMode, Item->FindData.cFileName);
+      Item->FindData.dwUnixMode=dwUnixMode;
 
       UnixTimeToFileTime((DWORD)GetOctal(TAR_hdr.header.mtime),&Item->FindData.ftLastWriteTime);
     }
+
     FAR_INT64 TarItemSize;
-    TarItemSize.i64=Oct2Size(TAR_hdr.header.size,sizeof(TAR_hdr.header.size));
+    TarItemSize.i64 = (TAR_hdr.header.typeflag == DIRTYPE) ? 0 : // #348
+			Oct2Size(TAR_hdr.header.size,sizeof(TAR_hdr.header.size));
     Item->PackSize=Item->FindData.nFileSizeLow=TarItemSize.Part.LowPart;
     Item->PackSizeHigh=Item->FindData.nFileSizeHigh=TarItemSize.Part.HighPart;
 

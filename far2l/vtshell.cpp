@@ -9,20 +9,30 @@
 #include <signal.h>
 #include <pthread.h>
 #include <mutex>
+#include <list>
 #include <atomic>
 #include <memory>
 #include <fcntl.h>
+#include <errno.h>
 #include <iostream>
 #include <fstream>
 #include <sys/ioctl.h> 
 #include <sys/wait.h> 
 #include <condition_variable>
+#include <base64.h> 
+#include <StackSerializer.h>
+#include <os_call.hpp>
+#include <ScopeHelpers.h>
 #include "vtansi.h"
 #include "vtlog.h"
+#include "VTFar2lExtensios.h"
+#include "InterThreadCall.hpp"
 #define __USE_BSD 
 #include <termios.h> 
 
-const char *VT_TranslateSpecialKey(const WORD key, bool ctrl, bool alt, bool shift, unsigned char keypad = 0);
+const char *VT_TranslateSpecialKey(const WORD key, bool ctrl, bool alt, bool shift, unsigned char keypad = 0,
+    WCHAR uc = 0);
+void VT_OnFar2lInterract(StackSerializer &stk_ser);
 
 int FarDispatchAnsiApplicationProtocolCommand(const char *str);
 
@@ -35,7 +45,7 @@ static void DbgPrintEscaped(const char *info, const char *s, size_t l)
 		if (c=='\\') {
 			msg+= "\\\\";
 		} else if (c <= 32 || c > 127) {
-			char zz[64]; sprintf(zz, "\\%02x", (unsigned int)c);
+			char zz[64]; sprintf(zz, "\\%02x", (unsigned int)(unsigned char)c);
 			msg+= zz;
 		} else 
 			msg+= (char)(unsigned char)c;
@@ -45,7 +55,6 @@ static void DbgPrintEscaped(const char *info, const char *s, size_t l)
 #else
 # define DbgPrintEscaped(i, s, l) 
 #endif
-
 
 template <class T> 
 class StopAndStart
@@ -75,7 +84,7 @@ public:
 	}
 
 protected:
-	bool  _started;
+	volatile bool  _started;
 
 	bool Start()
 	{
@@ -88,11 +97,13 @@ protected:
 		}		
 		return true;
 	}
-	
+
+	virtual void OnJoin() {}
 	void Join()
 	{
 		if (_started) {
 			_started = false;
+			OnJoin();
 			pthread_join(_thread, NULL);
 			_thread = 0;
 		}
@@ -133,7 +144,7 @@ public:
 	{
 		if (fd_out != -1 ) {
 			_fd_out = fd_out;
-			std::lock_guard<std::mutex> locker(_mutex);
+			InterThreadLock itl;
 			_deactivated = false;
 		}
 
@@ -153,10 +164,6 @@ public:
 	void Stop()
 	{
 		if (_started) {
-			char c = 0;
-			if (write(_pipe[1], &c, sizeof(c)) != sizeof(c))
-				perror("VTOutputReader::Stop - write");
-				
 			Join();
 			CheckedCloseFDPair(_pipe);
 		}
@@ -164,19 +171,27 @@ public:
 
 	void WaitDeactivation()
 	{
-		for (;;) {
-			std::unique_lock<std::mutex> locker(_mutex);
-			if (_deactivated) break;
-			_cond.wait(locker);
-		}
+		WAIT_FOR_AND_DISPATCH_INTER_THREAD_CALLS(_deactivated);
 	}
-	
-	
+
+	void KickAss()
+	{
+		char c = 0;
+		if (os_call_ssize(write, _pipe[1], (const void *)&c, sizeof(c)) != sizeof(c))
+			perror("VTOutputReader::Stop - write");
+	}
+
+protected:
+	virtual void OnJoin()
+	{
+		KickAss();
+		WithThread::OnJoin();
+	}
+
 private:
 	IProcessor *_processor;
 	int _fd_out, _pipe[2];
 	std::mutex _mutex;
-	std::condition_variable _cond;
 	bool _deactivated;
 	
 	virtual void *ThreadProc()
@@ -189,13 +204,13 @@ private:
 			FD_SET(_fd_out, &rfds);
 			FD_SET(_pipe[0], &rfds);
 			
-			int r = select(std::max(_fd_out, _pipe[0]) + 1, &rfds, NULL, NULL, NULL);
+			int r = os_call_int(select, std::max(_fd_out, _pipe[0]) + 1, &rfds, (fd_set *)nullptr, (fd_set *)nullptr, (timeval *)nullptr);
 			if (r <= 0) {
 				perror("VTOutputReader select");
 				break;
 			}
 			if (FD_ISSET(_fd_out, &rfds)) {
-				r = read(_fd_out, buf, sizeof(buf));
+				r = os_call_ssize(read, _fd_out, (void *)buf, sizeof(buf));
 				if (r <= 0) break;
 #if 1 //set to 0 to test extremely fragmented output processing 
 				if (!_processor->OnProcessOutput(buf, r)) break;
@@ -211,7 +226,7 @@ private:
 #endif
 			}
 			if (FD_ISSET(_pipe[0], &rfds)) {
-				r = read(_pipe[0], buf, sizeof(buf));
+				r = os_call_ssize(read, _pipe[0], (void *)buf, sizeof(buf));
 				if (r < 0) {
 					perror("VTOutputReader read pipe[0]");
 					break;
@@ -222,9 +237,8 @@ private:
 		}
 
 		//thread stopped due to output deactivated
-		std::unique_lock<std::mutex> locker(_mutex);
+		InterThreadLockAndWake itlw;
 		_deactivated = true;
-		_cond.notify_all();
 		return NULL;
 	}
 };
@@ -235,10 +249,12 @@ public:
 	struct IProcessor
 	{
 		virtual void OnInputMouse(const MOUSE_EVENT_RECORD &MouseEvent) = 0;
-		virtual void OnInputKeyDown(const KEY_EVENT_RECORD &KeyEvent) = 0;
+		virtual void OnInputKey(const KEY_EVENT_RECORD &KeyEvent) = 0;
 		virtual void OnInputResized(const INPUT_RECORD &ir) = 0;
+		virtual void OnInputInjected(const std::string &str) = 0;
+		virtual void OnRequestShutdown() = 0;
 	};
-	
+
 	VTInputReader(IProcessor *processor) : _stop(false), _processor(processor)
 	{
 	}
@@ -255,25 +271,44 @@ public:
 	{
 		if (_started) {
 			_stop = true;
-			//write some dommy console input to kick pending ReadConsoleInput
-			INPUT_RECORD ir = {0};
-			ir.EventType = FOCUS_EVENT;
-			ir.Event.FocusEvent.bSetFocus = TRUE;
-			DWORD dw = 0;
-			WINPORT(WriteConsoleInput)(0, &ir, 1, &dw);
 			Join();
 		}
 	}
-	
-	
+
+	void InjectInput(const char *str, size_t len)
+	{
+		{
+			std::unique_lock<std::mutex> locker(_pending_injected_inputs_mutex);
+			_pending_injected_inputs.emplace_back(str, len);
+		}
+		KickInputThread();
+	}
+
+protected:
+	virtual void OnJoin()
+	{
+		KickInputThread();
+		WithThread::OnJoin();
+	}
 
 private:
-	pid_t _pid;
 	std::atomic<bool> _stop;
 	IProcessor *_processor;
-	
+	std::list<std::string> _pending_injected_inputs;
+	std::mutex _pending_injected_inputs_mutex;
+
+	void KickInputThread()
+	{
+		// write some dummy console input to kick pending ReadConsoleInput
+		INPUT_RECORD ir = {};
+		ir.EventType = NOOP_EVENT;
+		DWORD dw = 0;
+		WINPORT(WriteConsoleInput)(0, &ir, 1, &dw);
+	}
+
 	virtual void *ThreadProc()
 	{
+		std::list<std::string> pending_injected_inputs;
 		while (!_stop) {
 			INPUT_RECORD ir = {0};
 			DWORD dw = 0;
@@ -282,10 +317,26 @@ private:
 				usleep(100000);
 			} else if (ir.EventType == MOUSE_EVENT) {
 				_processor->OnInputMouse(ir.Event.MouseEvent);
-			} else if (ir.EventType == KEY_EVENT && ir.Event.KeyEvent.bKeyDown) {
-				_processor->OnInputKeyDown(ir.Event.KeyEvent);
+
+			} else if (ir.EventType == KEY_EVENT) {
+				_processor->OnInputKey(ir.Event.KeyEvent);
+
 			} else if (ir.EventType == WINDOW_BUFFER_SIZE_EVENT) {
 				_processor->OnInputResized(ir);
+			}
+			{
+				std::unique_lock<std::mutex> locker(_pending_injected_inputs_mutex);
+				pending_injected_inputs.swap(_pending_injected_inputs);
+			}
+			for(const auto &pri : pending_injected_inputs) {
+				_processor->OnInputInjected(pri);
+			}
+
+			pending_injected_inputs.clear();
+
+			if (CloseFAR) {
+				_processor->OnRequestShutdown();
+				break;
 			}
 		}
 
@@ -315,16 +366,17 @@ public:
 		Reset();
 	}
 
-	std::string SetEnvCommand() const
-	{
-		std::string out = "export FARVTMARKER=";
-		out+= _marker;
-		return out;
-	}
-	
 	std::string EchoCommand() const
 	{
-		return "echo -ne \"=$FARVTRESULT:$FARVTMARKER\"";
+		std::string out = "echo -ne \"=$FARVTRESULT:\"$\'";
+		char escaped[16];
+		for (const auto c : _marker) {
+			sprintf(escaped, "\\x%02x",
+				(unsigned int)(unsigned char)c);
+			out+= escaped;
+		}
+		out+= '\'';
+		return out;
 	}
 	
 	int LastExitCode() const
@@ -383,30 +435,38 @@ public:
 	}
 };
 	
-class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCommands
+class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTShell
 {
 	VTAnsi _vta;
 	VTInputReader _input_reader;
 	VTOutputReader _output_reader;
 	std::mutex _inout_control_mutex;
-	std::mutex _fd_in_mutex;
-	std::mutex _keypad_mutex;
 	int _fd_out, _fd_in;
 	int _pipes_fallback_in, _pipes_fallback_out;
 	pid_t _shell_pid, _forked_proc_pid;
 	std::string _slavename;
 	CompletionMarker _completion_marker;
 	bool _skipping_line;
-	unsigned char _keypad;
+	std::atomic<unsigned char> _keypad;
 	INPUT_RECORD _last_window_info_ir;
+	VTFar2lExtensios *_far2l_exts = nullptr;
+	std::mutex _far2l_exts_mutex, _write_term_mutex;
 	
 	
 	int ForkAndAttachToSlave(bool shell)
 	{
 		int r = fork();
-		if (r!=0)
+		if (r != 0)
 			return r;
-			
+
+		signal(SIGHUP, SIG_DFL);
+		signal(SIGINT, SIG_DFL);
+		signal(SIGQUIT, SIG_DFL);
+		signal(SIGTERM, SIG_DFL);
+		signal(SIGPIPE, SIG_DFL);
+		signal(SIGCHLD, SIG_DFL);
+		signal(SIGSTOP, SIG_DFL);
+
 		if (shell) {
 			if (setsid()==-1)
 				perror("VT: setsid");
@@ -420,7 +480,7 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 				exit(errno);
 			}
 				
-			if ( ioctl( 0, TIOCSCTTY, 0 )==-1 )
+			if ( ioctl( r, TIOCSCTTY, 0 )==-1 )
 				perror( "VT: ioctl(TIOCSCTTY)" );
 					
 			dup2(r, STDIN_FILENO);
@@ -497,11 +557,11 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 			_pipes_fallback_out = fd_out[1];
 			_fd_in = fd_in[1];
 			_fd_out = fd_out[0];
-			
+
 		} else {
 			_pipes_fallback_in = _pipes_fallback_out = -1;
-			struct termios ts = {0};
-			if (tcgetattr(fd_term, &ts)==0) {
+			struct termios ts = {};
+			if (tcgetattr(fd_term, &ts) == 0) {
 				ts.c_lflag |= ISIG | ICANON | ECHO;
 				//ts.c_lflag&= ~ECHO;
 				ts.c_cc[VINTR] = 3;
@@ -511,7 +571,7 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 			_fd_out = dup(fd_term);
 			fcntl(_fd_out, F_SETFD, FD_CLOEXEC);
 		}
-		
+
 		return true;
 	}
 
@@ -522,8 +582,10 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 		const char *shell = getenv("SHELL");
 		if (!shell)
 			shell = "/bin/sh";
-		// avoid using fish for a while, it requites changes in Opt.strQuotedSymbols
-		if (strcmp(shell, "/usr/bin/fish")==0)
+
+		// avoid using fish for a while, it requites changes in Opt.strQuotedSymbols and some others
+		const char *slash = strrchr(shell, '/');
+		if (strcmp(slash ? slash + 1 : shell, "fish")==0)
 			shell = "/bin/bash";
 
 		//shell = "/usr/bin/zsh";
@@ -619,17 +681,27 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 		return out;
 	}
 	
-	virtual void OnInputResized(const INPUT_RECORD &ir) //called from worker thread
+	virtual void OnTerminalResized()
 	{
 		if (!_slavename.empty())
 			UpdateTerminalSize(_fd_out);
+	}
 
+	virtual void OnInputResized(const INPUT_RECORD &ir) //called from worker thread
+	{
+		OnTerminalResized();
 		_last_window_info_ir = ir;
 	}
 	
 	virtual void OnInputMouse(const MOUSE_EVENT_RECORD &MouseEvent)
 	{
 		//fprintf(stderr, "OnInputMouse: %x\n", MouseEvent.dwEventFlags);
+		{
+			std::lock_guard<std::mutex> lock(_far2l_exts_mutex);
+			if (_far2l_exts && _far2l_exts->OnInputMouse(MouseEvent))
+				return;
+		}
+
 		if (MouseEvent.dwEventFlags & MOUSE_WHEELED) {
 			if (HIWORD(MouseEvent.dwButtonState) > 0) {
 				OnConsoleLog(CLK_VIEW_AUTOCLOSE);
@@ -640,8 +712,44 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 		}
 	}
 
-	virtual void OnInputKeyDown(const KEY_EVENT_RECORD &KeyEvent) //called from worker thread
+
+	bool WriteTerm(const char *str, size_t len)
 	{
+		if (len == 0)
+			return true;
+
+		std::lock_guard<std::mutex> lock(_write_term_mutex);
+		while (len) {
+			ssize_t written = os_call_ssize(write, _fd_in, (const void *)str, len);
+			if (written <= 0) {
+				perror("WriteTerm - write");
+				return false;
+			}
+			len-= written;
+			str+= written;
+		}
+
+		return true;
+	}
+
+	virtual void OnInputInjected(const std::string &str) //called from worker thread
+	{
+		if (!WriteTerm(str.c_str(), str.size())) {
+			fprintf(stderr, "VT: OnInputInjected - write error %d\n", errno);
+		}
+	}
+
+	virtual void OnInputKey(const KEY_EVENT_RECORD &KeyEvent) //called from worker thread
+	{
+		{
+			std::lock_guard<std::mutex> lock(_far2l_exts_mutex);
+			if (_far2l_exts && _far2l_exts->OnInputKey(KeyEvent))
+				return;
+		}
+
+		if (!KeyEvent.bKeyDown)
+			return;
+
 		DWORD dw;
 		const std::string &translated = TranslateKeyEvent(KeyEvent);
 		if (!translated.empty()) {
@@ -649,9 +757,8 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 				WINPORT(WriteConsole)( NULL, &KeyEvent.uChar.UnicodeChar, 1, &dw, NULL );
 			}
 			DbgPrintEscaped("INPUT", translated.c_str(), translated.size());
-			std::lock_guard<std::mutex> lock(_fd_in_mutex);
-			if (write(_fd_in, translated.c_str(), translated.size())!=(int)translated.size()) {
-				fprintf(stderr, "VT: write failed\n");
+			if (!WriteTerm(translated.c_str(), translated.size())) {
+				fprintf(stderr, "VT: OnInputKeyDown - write error %d\n", errno);
 			}
 		} else {
 			fprintf(stderr, "VT: not translated keydown: VK=0x%x MODS=0x%x char=0x%x\n", 
@@ -682,7 +789,26 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 		CLK_VIEW,
 		CLK_VIEW_AUTOCLOSE
 	};
-	
+
+	static int sShowConsoleLog(ConsoleLogKind kind, const std::string &histfile)
+	{
+		if (!CtrlObject || !CtrlObject->CmdLine)
+			return 0;
+
+		ScrBuf.FillBuf();
+		CtrlObject->CmdLine->SaveBackground();
+
+		SetFarConsoleMode(TRUE);
+		if (kind == CLK_EDIT)
+			ModalEditTempFile(histfile, true);
+		else
+			ModalViewTempFile(histfile, true, kind == CLK_VIEW_AUTOCLOSE);
+
+		CtrlObject->CmdLine->ShowBackground();
+		ScrBuf.Flush();
+		return 1;
+	}
+
 	void OnConsoleLog(ConsoleLogKind kind)//NB: called not from main thread!
 	{
 		std::unique_lock<std::mutex> lock(_inout_control_mutex, std::try_to_lock);
@@ -703,18 +829,8 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 		if (histfile.empty())
 			return;
 
-		ScrBuf.FillBuf();
-		CtrlObject->CmdLine->SaveBackground();
-
-		SetFarConsoleMode(TRUE);
 		DeliverPendingWindowInfo();
-		if (kind == CLK_EDIT)
-			ModalEditTempFile(histfile, true);
-		else
-			ModalViewTempFile(histfile, true, kind == CLK_VIEW_AUTOCLOSE);
-
-		CtrlObject->CmdLine->ShowBackground();
-		ScrBuf.Flush();
+		InterThreadCall<int>(std::bind(sShowConsoleLog, kind, histfile));
 
 		if (!_slavename.empty())
 			UpdateTerminalSize(_fd_out);
@@ -723,65 +839,65 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 	virtual void OnKeypadChange(unsigned char keypad)
 	{
 //		fprintf(stderr, "VTShell::OnKeypadChange: %u\n", keypad);
-		std::lock_guard<std::mutex> lock(_keypad_mutex);
 		_keypad = keypad;
 	}
 
-	virtual int OnApplicationProtocolCommand(const char *str)//NB: called not from main thread!
+	virtual void OnApplicationProtocolCommand(const char *str)//NB: called not from main thread!
 	{
-		std::unique_lock<std::mutex> lock(_inout_control_mutex, std::try_to_lock);
-		if (!lock) {
-			fprintf(stderr, "VTShell::OnApplicationProtocolCommand: SKIPPED '%s'\n", str);
-			return -1;
-		}
+		if (strncmp(str, "far2l", 5) == 0) {
+			std::string reply;
+			switch (str[5]) {
+				case '1': {
+					std::lock_guard<std::mutex> lock(_far2l_exts_mutex);
+					if (!_far2l_exts)
+						_far2l_exts = new VTFar2lExtensios(this);
 
-		//called from _vta in output thread context
-		//we're output, stop input and remember _vta state
-		StopAndStart<VTInputReader> sas(_input_reader);
-		VTAnsiSuspend vta_suspend(_vta);
-		
-		ScrBuf.FillBuf();
-		CtrlObject->CmdLine->SaveBackground();
-		
-		SetFarConsoleMode(TRUE);
-		DeliverPendingWindowInfo();
-		int r = FarDispatchAnsiApplicationProtocolCommand(str);
+					reply = "\x1b_far2lok\x07";
+				} break;
 
-		CtrlObject->CmdLine->ShowBackground();
-		ScrBuf.Flush();
+				case '0': {
+					std::lock_guard<std::mutex> lock(_far2l_exts_mutex);
+					delete _far2l_exts;
+					_far2l_exts = nullptr;
+				} break;
 
-		if (!_slavename.empty())
-			UpdateTerminalSize(_fd_out);
-		
-		return r;
-	}
-	
-	virtual void WriteRawInput(const char *str)
-	{
-		size_t l = strlen(str);
-		
-		std::lock_guard<std::mutex> lock(_fd_in_mutex);
-		tcdrain(_fd_in);
-		usleep(1000);//drain seems not drainy enough...
-		struct termios ts = {0};
-		int ra = tcgetattr(_fd_in, &ts);
-		if (ra == 0) {
-			struct termios ts2 = ts;
-			cfmakeraw(&ts2);
-			tcsetattr( _fd_in, TCSADRAIN, &ts2 );
-		}
+				case ':': {
+					std::lock_guard<std::mutex> lock(_far2l_exts_mutex);
+					if (str[6] && _far2l_exts) {
+						StackSerializer stk_ser;
+						uint8_t id = 0;
+						try {
+							stk_ser.FromBase64(str + 6, strlen(str + 6));
+							id = stk_ser.PopU8();
+							_far2l_exts->OnInterract(stk_ser);
 
-		if (write(_fd_in, str, l) != (int)l) {
-			fprintf(stderr, "VT: WriteRawInput failed\n");
-		}
-		tcdrain(_fd_in);
-		usleep(1000);
-		
-		if (ra == 0) {
-			tcsetattr( _fd_in, TCSADRAIN, &ts );
+						} catch (std::exception &) {
+							stk_ser.Clear();
+						}
+
+						if (id) try {
+							stk_ser.PushPOD(id);
+							reply = "\x1b_far2l";
+							reply+= stk_ser.ToBase64();
+							reply+= '\x07';
+
+						} catch (std::exception &) {
+							reply.clear();
+						}
+					}
+
+				} break;
+			}
+			if (!reply.empty())
+				_input_reader.InjectInput(reply.c_str(), reply.size());
 		}
 	}
 	
+	virtual void InjectInput(const char *str)
+	{
+		_input_reader.InjectInput(str, strlen(str));
+	}
+
 	std::string StringFromClipboard()
 	{
 		std::string out;
@@ -824,8 +940,8 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 				OnConsoleLog(CLK_VIEW);
 			} 
 
-			std::lock_guard<std::mutex> lock(_keypad_mutex);
-			const char *spec = VT_TranslateSpecialKey(KeyEvent.wVirtualKeyCode, ctrl, alt, shift, _keypad);
+			const char *spec = VT_TranslateSpecialKey(
+				KeyEvent.wVirtualKeyCode, ctrl, alt, shift, _keypad, KeyEvent.uChar.UnicodeChar);
 			if (spec)
 				return spec;
 		}
@@ -840,18 +956,38 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 	void SendSignalToShell(int sig)
 	{
 		pid_t grp = getpgid(_shell_pid);
-		
-		if (grp!=-1 && grp!=getpgid(getpid()))
+
+		if (grp != -1 && grp != getpgid(getpid())) {
 			killpg(grp, sig);
-		else
-			kill(_shell_pid, sig);			
+			// kill(_shell_pid, sig);
+		} else
+			kill(_shell_pid, sig);
 	}
 	
+	virtual void OnRequestShutdown()
+	{
+		FDScope dev_null(open("/dev/null", O_RDWR));
+		if (dev_null.Valid()) {
+			if (_fd_in != -1)
+				dup2(dev_null, _fd_in);
+			if (_fd_out != -1)
+				dup2(dev_null, _fd_out);
 
-	void Shutdown() {
-		CheckedCloseFD(_fd_in);
-		CheckedCloseFD(_fd_out);
-		
+		} else {
+			perror("OnRequestShutdown - open /dev/null");
+			CheckedCloseFD(_fd_in);
+			CheckedCloseFD(_fd_out);
+		}
+
+		_output_reader.KickAss();
+	}
+
+
+
+	void Shutdown()
+	{
+		OnRequestShutdown();
+
 		if (_shell_pid!=-1) {
 			//kill(_shell_pid, SIGKILL);
 			int status;
@@ -859,7 +995,7 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 			_shell_pid = -1;
 		}
 	}
-	
+
 	void DeliverPendingWindowInfo()
 	{
 		if (_last_window_info_ir.EventType == WINDOW_BUFFER_SIZE_EVENT) {
@@ -870,30 +1006,24 @@ class VTShell : VTOutputReader::IProcessor, VTInputReader::IProcessor, IVTAnsiCo
 	}
 	
 	
-	std::string GenerateExecuteCommandScript(const char *cmd, bool need_sudo)
+	std::string GenerateExecuteCommandScript(const char *cd, const char *cmd, bool need_sudo)
 	{
 		char name[128]; 
 		sprintf(name, "vtcmd/%x_%p", getpid(), this);
 		std::string cmd_script = InMyTemp(name);
-		FILE *f = fopen(cmd_script.c_str(), "wt");
+		std::string pwd_file = cmd_script + ".pwd";
+		FILE *f = fopen(cmd_script.c_str(), "wb");
 		if (!f)
 			return std::string();
 
 static bool shown_tip_init = false;
 static bool shown_tip_exit = false;
-
-		char cd[MAX_PATH + 1] = {'.', 0};
-		if (!sdc_getcwd(cd, MAX_PATH)) {
-			perror("getcwd");
-		} 
 				
 		if (!need_sudo) {
 			need_sudo = (chdir(cd)==-1 && (errno==EACCES || errno==EPERM));
 		}
-
 		fprintf(f, "trap \"echo ''\" SIGINT\n");//we need marker to be printed even after Ctrl+C pressed
 		fprintf(f, "PS1=''\n");//reduce risk of glitches
-		fprintf(f, "%s\n", _completion_marker.SetEnvCommand().c_str());
 		//fprintf(f, "stty echo\n");
 		if (strcmp(cmd, "exit")==0) {
 			fprintf(f, "echo \"Closing back shell.%s\"\n", 
@@ -901,17 +1031,25 @@ static bool shown_tip_exit = false;
 			shown_tip_exit = true;
 
 		} else if (!shown_tip_init) {
-			fprintf(f, "echo -ne \"\x1b_push-attr\x07\x1b[36m\"\n");
-			fprintf(f, "echo \"Ctrl+Alt+C - terminate everything in this shell.\"\n");
-			fprintf(f, "echo \"Ctrl+Shift+F3/+F4 - pause and open viewer/editor with console log.\"\n");
-			fprintf(f, "echo \"Ctrl+Shift+MouseScrollUp - pause and open autoclosing viewer with console log.\"\n");
-			fprintf(f, "echo ════════════════════════════════════════════════════════════════════\x1b_pop-attr\x07\n");
-			shown_tip_init = true;
+			if (!Opt.OnlyEditorViewerUsed) {
+				fprintf(f, "echo -ne \"\x1b_push-attr\x07\x1b[36m\"\n");
+				fprintf(f, "echo \"While typing command with panels off:\"\n");
+				fprintf(f, "echo \" Double Shift+TAB - bash-guided autocomplete.\"\n");
+				fprintf(f, "echo \" F3, F4, F8 - viewer/editor/clear console log.\"\n");
+				fprintf(f, "echo \" Ctrl+Shift+MouseScrollUp - open autoclosing viewer with console log.\"\n");
+				fprintf(f, "echo \"While executing command:\"\n");
+				fprintf(f, "echo \" Ctrl+Alt+C - terminate everything in this shell.\"\n");
+				fprintf(f, "echo \" Ctrl+Shift+F3/+F4 - pause and open viewer/editor with console log.\"\n");
+				fprintf(f, "echo \" MouseScrollUp - pause and open autoclosing viewer with console log.\"\n");
+				fprintf(f, "echo ════════════════════════════════════════════════════════════════════\x1b_pop-attr\x07\n");
+				shown_tip_init = true;
+			}
 		}
 		if (need_sudo) {
-			fprintf(f, "sudo sh -c \"cd \\\"%s\\\" && %s\"\n", EscapeEscapes(EscapeQuotas(cd)).c_str(), EscapeEscapes(cmd).c_str());
+			fprintf(f, "sudo sh -c \"cd \\\"%s\\\" && %s && pwd >'%s'\"\n",
+				EscapeEscapes(EscapeQuotas(cd)).c_str(), EscapeEscapes(cmd).c_str(), pwd_file.c_str());
 		} else {
-			fprintf(f, "cd \"%s\" && %s\n", EscapeQuotas(cd).c_str(), cmd);
+			fprintf(f, "cd \"%s\" && %s && pwd >'%s'\n", EscapeQuotas(cd).c_str(), cmd, pwd_file.c_str());
 		}
 
 		fprintf(f, "FARVTRESULT=$?\n");//it will be echoed to caller from outside
@@ -921,7 +1059,6 @@ static bool shown_tip_exit = false;
 		fprintf(f, "else\n");
 		fprintf(f, "echo \"\x1b_push-attr\x07\x1b_set-blank=~\x07\x1b[33m\x1b[K\x1b_pop-attr\x07\"\n");
 		fprintf(f, "fi\n");
-		fprintf(f, "%s\n", _completion_marker.SetEnvCommand().c_str());//second time - prevent user from shooting own leg
 		fclose(f);
 		return cmd_script;
 	}
@@ -951,31 +1088,36 @@ static bool shown_tip_exit = false;
 		if (_shell_pid==-1)
 			return -1;
 
-		const std::string &cmd_script = GenerateExecuteCommandScript(cmd, force_sudo);
+		char cd[MAX_PATH + 1] = {'.', 0};
+		if (!sdc_getcwd(cd, MAX_PATH)) {
+			perror("getcwd");
+		}
+
+		const std::string &cmd_script = GenerateExecuteCommandScript(cd, cmd, force_sudo);
 		if (cmd_script.empty())
 			return -1;
 
+		std::string pwd_file = cmd_script + ".pwd";
+		unlink(pwd_file.c_str());
+
 		if (!_slavename.empty())
 			UpdateTerminalSize(_fd_out);
-		
 		
 		std::string cmd_str = " . "; //space in beginning of command prevents adding it to history
 		cmd_str+= EscapeQuotas(cmd_script);
 		cmd_str+= ';';
 		cmd_str+= _completion_marker.EchoCommand();
 		cmd_str+= '\n';
-		
-		{
-			std::lock_guard<std::mutex> lock(_fd_in_mutex);
-			int r = write(_fd_in, cmd_str.c_str(), cmd_str.size());
-			if (r != (int)cmd_str.size()) {
-				fprintf(stderr, "VT: write failed\n");
-				return -1;
-			}
+
+		if (!WriteTerm(cmd_str.c_str(), cmd_str.size())) {
+			fprintf(stderr, "VT: write error %d\n", errno);
+			return -1;
 		}
-		
+
 		_skipping_line = true;
-		
+
+		_vta.OnStart(cd);
+
 		{
 			std::lock_guard<std::mutex> lock(_inout_control_mutex);
 			_output_reader.Start(_fd_out);
@@ -983,6 +1125,22 @@ static bool shown_tip_exit = false;
 		}
 		
 		_output_reader.WaitDeactivation();
+
+		int fd = open(pwd_file.c_str(), O_RDONLY);
+		if (fd != -1) {
+			char buf[PATH_MAX + 1] = {};
+			ReadAll(fd, buf, sizeof(buf) - 1);
+			CheckedCloseFD(fd);
+			size_t len = strlen(buf);
+			if (len > 0 && buf[len - 1] == '\n') {
+				buf[--len] = 0;
+			}
+			if (len > 0) {
+				sdc_chdir(buf);
+			}
+			unlink(pwd_file.c_str());
+		}
+
 		if (_shell_pid!=-1) {
 			int status;
 			if (waitpid(_shell_pid, &status, WNOHANG)==_shell_pid) {
@@ -995,12 +1153,18 @@ static bool shown_tip_exit = false;
 			_input_reader.Stop();
 			_output_reader.Stop();
 		}
+
 		remove(cmd_script.c_str());
 
-		_vta.Reset();
 		OnKeypadChange(0);
-		DeliverPendingWindowInfo();
 		_completion_marker.Reset();
+		_vta.OnStop();
+		DeliverPendingWindowInfo();
+
+		std::lock_guard<std::mutex> lock(_far2l_exts_mutex);
+		delete _far2l_exts;
+		_far2l_exts = nullptr;
+
 		return _completion_marker.LastExitCode();
 	}	
 
@@ -1008,6 +1172,7 @@ static bool shown_tip_exit = false;
 	{
 		return _shell_pid!=-1;
 	}
+
 };
 
 static std::unique_ptr<VTShell> g_vts;

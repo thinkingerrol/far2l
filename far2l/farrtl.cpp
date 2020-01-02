@@ -6,6 +6,9 @@ farrtl.cpp
 
 #include "headers.hpp"
 
+#if !defined(__APPLE__) && !defined(__FreeBSD__)
+# include <alloca.h>
+#endif
 
 #include "savefpos.hpp"
 #include "console.hpp"
@@ -26,8 +29,7 @@ bool InsufficientMemoryHandler()
 	INPUT_RECORD ir={};
 	do
 	{
-		DWORD Read;
-		Console.ReadInput(ir, 1, Read);
+		Console.ReadInput(ir);
 	}
 	while(!(ir.EventType == KEY_EVENT && !ir.Event.KeyEvent.bKeyDown && (ir.Event.KeyEvent.wVirtualKeyCode == VK_RETURN || ir.Event.KeyEvent.wVirtualKeyCode == VK_RETURN || ir.Event.KeyEvent.wVirtualKeyCode == VK_ESCAPE)));
 	return ir.Event.KeyEvent.wVirtualKeyCode == VK_RETURN;
@@ -181,7 +183,7 @@ extern "C"
 
 int64_t ftell64(FILE *fp)
 {
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__CYGWIN__)
 	return ftello(fp);
 #elif defined(__GNUC__)
 	return ftello64(fp);
@@ -192,7 +194,7 @@ int64_t ftell64(FILE *fp)
 
 int fseek64(FILE *fp, int64_t offset, int whence)
 {
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__CYGWIN__)
 	return fseeko(fp,offset,whence);
 #elif defined(__GNUC__)
 	return fseeko64(fp,offset,whence);

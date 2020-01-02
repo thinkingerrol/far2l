@@ -754,8 +754,8 @@ int64_t FileList::VMProcess(int OpCode,void *vParam,int64_t iParam)
 					switch(mps->Mode)
 					{
 						case 0: // выделить все?
-						    for (int i=0; i < FileCount; i++)
-						    	Select(ListData[i],TRUE);
+							for (int i=0; i < FileCount; i++)
+							  Select(ListData[i],TRUE);
 							Result=(int64_t)GetRealSelCount();
 							break;
 						case 1: // по индексу?
@@ -790,8 +790,8 @@ int64_t FileList::VMProcess(int OpCode,void *vParam,int64_t iParam)
 					switch(mps->Mode)
 					{
 						case 0: // инвертировать все?
-						    for (int i=0; i < FileCount; i++)
-						    	Select(ListData[i],ListData[i]->Selected?FALSE:TRUE);
+							for (int i=0; i < FileCount; i++)
+							  Select(ListData[i],ListData[i]->Selected?FALSE:TRUE);
 							Result=(int64_t)GetRealSelCount();
 							break;
 						case 1: // по индексу?
@@ -845,6 +845,61 @@ int64_t FileList::VMProcess(int OpCode,void *vParam,int64_t iParam)
 
 	return 0;
 }
+
+class FileList_EditedFileUploader : public BaseEditedFileUploader
+{
+	HANDLE hPlugin;
+
+	virtual void UploadTempFile()
+	{
+		FARString strSaveDir;
+		apiGetCurrentDirectory(strSaveDir);
+
+		FARString strPath = strTempFileName;
+
+		if (apiGetFileAttributes(strPath) == INVALID_FILE_ATTRIBUTES)
+		{
+			FARString strFindName;
+			CutToSlash(strPath, false);
+			strFindName = strPath + L"*";
+			FAR_FIND_DATA_EX FindData;
+			::FindFile Find(strFindName);
+			while (Find.Get(FindData))
+			{
+				if (!(FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+				{
+					strPath+= FindData.strFileName;
+					break;
+				}
+			}
+		}
+
+		PluginPanelItem PanelItem;
+		if (FileList::FileNameToPluginItem(strPath, &PanelItem))
+		{
+			PutCode = CtrlObject->Plugins.PutFiles(hPlugin, &PanelItem, 1, FALSE, OPM_EDIT);
+
+			if (PutCode == 0)
+			{
+				Message(MSG_WARNING, 1, MSG(MError), MSG(MCannotSaveFile),
+				        MSG(MTextSavedToTemp), strPath.CPtr(), MSG(MOk));
+			}
+		}
+
+		FarChDir(strSaveDir);
+	}
+
+public:
+	int PutCode = -1;
+
+	FileList_EditedFileUploader(const FARString &strTempFileName_, HANDLE hPlugin_)
+	:
+		BaseEditedFileUploader(strTempFileName_),
+		hPlugin(hPlugin_)
+	{
+	}
+};
+
 
 int FileList::ProcessKey(int Key)
 {
@@ -1377,12 +1432,12 @@ int FileList::ProcessKey(int Key)
 			{
 				int Edit=(Key==KEY_F4 || Key==KEY_ALTF4 || Key==KEY_SHIFTF4 || Key==KEY_CTRLSHIFTF4);
 				BOOL Modaling=FALSE; ///
-				int UploadFile=TRUE;
 				FARString strPluginData;
 				FARString strFileName;
 				FARString strHostFile=Info.HostFile;
 				FARString strInfoCurDir=Info.CurDir;
 				bool PluginMode=PanelMode==PLUGIN_PANEL && !CtrlObject->Plugins.UseFarCommand(hPlugin,PLUGIN_FARGETFILE);
+				std::unique_ptr<FileList_EditedFileUploader> efu;
 
 				if (PluginMode)
 				{
@@ -1490,7 +1545,7 @@ int FileList::ProcessKey(int Key)
 				}
 
 				FARString strTempDir, strTempName;
-				int UploadFailed=FALSE, NewFile=FALSE;
+				int NewFile=FALSE;
 
 				if (PluginMode)
 				{
@@ -1546,6 +1601,11 @@ int FileList::ProcessKey(int Key)
 						/* $ 02.08.2001 IS обработаем ассоциации для alt-f4 */
 						BOOL Processed=FALSE;
 
+						if (PluginMode)
+						{
+							efu.reset(new FileList_EditedFileUploader(strTempName, hPlugin));
+						}
+
 						if (Key==KEY_ALTF4 &&
 						        ProcessLocalFileTypes(strFileName,FILETYPE_ALTEDIT,
 						                              PluginMode))
@@ -1558,11 +1618,15 @@ int FileList::ProcessKey(int Key)
 						if (!Processed || Key==KEY_CTRLSHIFTF4)
 						{
 							if (EnableExternal)
+							{
 								ProcessExternal(Opt.strExternalEditor,strFileName,PluginMode);
+							}
 							else if (PluginMode)
 							{
 								RefreshedPanel=FrameManager->GetCurrentFrame()->GetType()==MODALTYPE_EDITOR?FALSE:TRUE;
 								FileEditor ShellEditor(strFileName,codepage,(Key==KEY_SHIFTF4?FFILEEDIT_CANNEWFILE:0)|FFILEEDIT_DISABLEHISTORY,-1,-1,strPluginData);
+								ShellEditor.SetSaveObserver(efu.get());
+
 								editorExitCode=ShellEditor.GetExitCode();
 								ShellEditor.SetDynamicallyBorn(false);
 								FrameManager->EnterModalEV();
@@ -1572,12 +1636,12 @@ int FileList::ProcessKey(int Key)
 								     Если мы создали новый файл, то не важно, изменялся он
 								     или нет, все равно добавим его на панель плагина.
 								*/
-								UploadFile=ShellEditor.IsFileChanged() || NewFile;
+//								UploadFile=ShellEditor.IsFileChanged() || NewFile;
 								Modaling=TRUE;///
 							}
 							else
 							{
-								FileEditor *ShellEditor=new FileEditor(strFileName,codepage,(Key==KEY_SHIFTF4?FFILEEDIT_CANNEWFILE:0)|FFILEEDIT_ENABLEF6);
+								FileEditor *ShellEditor=new(std::nothrow) FileEditor(strFileName,codepage,(Key==KEY_SHIFTF4?FFILEEDIT_CANNEWFILE:0)|FFILEEDIT_ENABLEF6);
 
 								if (ShellEditor)
 								{
@@ -1608,44 +1672,6 @@ int FileList::ProcessKey(int Key)
 							}
 						}
 
-						if (PluginMode && UploadFile)
-						{
-							PluginPanelItem PanelItem;
-							FARString strSaveDir;
-							apiGetCurrentDirectory(strSaveDir);
-
-							if (apiGetFileAttributes(strTempName)==INVALID_FILE_ATTRIBUTES)
-							{
-								FARString strFindName;
-								FARString strPath;
-								strPath = strTempName;
-								CutToSlash(strPath, false);
-								strFindName = strPath+L"*";
-								FAR_FIND_DATA_EX FindData;
-								::FindFile Find(strFindName);
-								while(Find.Get(FindData))
-								{
-									if (!(FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
-									{
-										strTempName = strPath+FindData.strFileName;
-										break;
-									}
-								}
-							}
-
-							if (FileNameToPluginItem(strTempName,&PanelItem))
-							{
-								int PutCode=CtrlObject->Plugins.PutFiles(hPlugin,&PanelItem,1,FALSE,OPM_EDIT);
-
-								if (PutCode==1 || PutCode==2)
-									SetPluginModified();
-
-								if (!PutCode)
-									UploadFailed=TRUE;
-							}
-
-							FarChDir(strSaveDir);
-						}
 					}
 					else
 					{
@@ -1680,7 +1706,7 @@ int FileList::ProcessKey(int Key)
 									ViewList.SetCurName(strFileName);
 								}
 
-								FileViewer *ShellViewer=new FileViewer(strFileName, TRUE,PluginMode,PluginMode,-1,strPluginData,&ViewList);
+								FileViewer *ShellViewer=new(std::nothrow) FileViewer(strFileName, TRUE,PluginMode,PluginMode,-1,strPluginData,&ViewList);
 
 								if (ShellViewer)
 								{
@@ -1708,15 +1734,23 @@ int FileList::ProcessKey(int Key)
 				     для файла, который открывался во внутреннем вьюере, ничего не
 				     предпринимаем, т.к. вьюер об этом позаботится сам
 				*/
+
 				if (PluginMode)
 				{
-					if (UploadFailed)
-						Message(MSG_WARNING,1,MSG(MError),MSG(MCannotSaveFile),
-						        MSG(MTextSavedToTemp),strFileName,MSG(MOk));
-					else if (Edit || DeleteViewedFile)
+					if (efu)
+					{
+						efu->UploadIfTimestampChanged();
+						if (efu->PutCode != -1)
+						{
+							SetPluginModified();
+						}
+					}
+					if ((Edit || DeleteViewedFile) && (!efu || efu->PutCode != 0))
+					{
 						// удаляем файл только для случая окрытия его в редакторе или во
 						// внешнем вьюере, т.к. внутренний вьюер удаляет файл сам
 						DeleteFileWithFolder(strFileName);
+					}
 				}
 
 				if (Modaling && (Edit || IsColumnDisplayed(ADATE_COLUMN)) && RefreshedPanel)
@@ -2326,14 +2360,8 @@ void FileList::ProcessEnter(bool EnableExec,bool SeparateWindow,bool EnableAssoc
 		}
 
 		ExtPtr=wcsrchr(strFileName,L'.');
-		int ExeType=FALSE,BatType=FALSE;
 
-		if (ExtPtr) 
-		{
-			ExeType = (!StrCmpI(ExtPtr,L".sh") || !StrCmpI(ExtPtr,L".py") || !StrCmpI(ExtPtr,L".pl"));//TODO: detect executable bit
-		}
-
-		if (EnableExec && (ExeType || BatType))
+		if (EnableExec && IsExecutableFilePath(strFileName.GetMB().c_str()))
 		{
 			EscapeSpace(strFileName);
 
@@ -2367,7 +2395,7 @@ void FileList::ProcessEnter(bool EnableExec,bool SeparateWindow,bool EnableAssoc
 			        hOpen==(HANDLE)-2)
 			{
 				if (EnableExec && hOpen!=(HANDLE)-2)
-					if (SeparateWindow || Opt.UseRegisteredTypes)
+//					if (SeparateWindow || Opt.UseRegisteredTypes)
 					{
 						SetCurPath(); // OpenFilePlugin can change current path
 						ProcessGlobalFileTypes(strFileName, PluginMode, RunAs);
@@ -2435,7 +2463,7 @@ BOOL FileList::ChangeDir(const wchar_t *NewDir,BOOL IsUpdated)
 		/* $ 28.08.2007 YJH
 		+ У форточек сносит крышу на GetFileAttributes("..") при нахождении в
 		корне UNC пути. Приходится обходить в ручную */
-		if (dot2Present &&
+		/* if (dot2Present &&
 		        !StrCmpN(strCurDir, L"//?/", 4) && strCurDir.At(4) &&
 		        !StrCmpN(&strCurDir[5], L":/",2))
 		{
@@ -2448,7 +2476,7 @@ BOOL FileList::ChangeDir(const wchar_t *NewDir,BOOL IsUpdated)
 				strSetDir = strCurDir;
 				CutToSlash(strSetDir);
 			}
-		}
+		} */
 
 		PrepareDiskPath(strSetDir);
 	}
@@ -2499,6 +2527,15 @@ BOOL FileList::ChangeDir(const wchar_t *NewDir,BOOL IsUpdated)
 		}
 		else
 		{
+			if (!dot2Present && CurFile<FileCount && !PluginsList.Empty())
+			{
+				PluginsListItem *Last=*PluginsList.Last();
+				if (Last)
+				{
+					Last->Dir2CursorFile[strInfoCurDir] = ListData[CurFile]->strName;
+				}
+			}
+
 			strFindDir = strInfoCurDir;
 			SetDirectorySuccess=CtrlObject->Plugins.SetDirectory(hPlugin,strSetDir,0);
 		}
@@ -2506,8 +2543,9 @@ BOOL FileList::ChangeDir(const wchar_t *NewDir,BOOL IsUpdated)
 		ProcessPluginCommand();
 
 		if (SetDirectorySuccess)
+		{
 			Update(0);
-		else
+		} else
 			Update(UPDATE_KEEP_SELECTION);
 
 		if (PluginClosed && !PrevDataList.Empty())
@@ -2535,6 +2573,18 @@ BOOL FileList::ChangeDir(const wchar_t *NewDir,BOOL IsUpdated)
 		if (dot2Present)
 		{
 			long Pos=FindFile(PointToName(strFindDir));
+			if (Pos==-1 && !PluginClosed && !PluginsList.Empty())
+			{
+				PluginsListItem *Last=*PluginsList.Last();
+				if (Last)
+				{
+					OpenPluginInfo InfoNew;
+					CtrlObject->Plugins.GetOpenPluginInfo(hPlugin,&InfoNew);
+					auto it = Last->Dir2CursorFile.find(FARString(Info.CurDir));
+					if (it != Last->Dir2CursorFile.end())
+						Pos=FindFile(it->second);
+				}
+			}
 
 			if (Pos!=-1)
 				CurFile=Pos;
@@ -3331,12 +3381,12 @@ long FileList::SelectFiles(int Mode,const wchar_t *Mask)
 	const wchar_t *HistoryName=L"Masks";
 	DialogDataEx SelectDlgData[]=
 	{
-		DI_DOUBLEBOX,3,1,51,5,0,0,L"",
-		DI_EDIT,5,2,49,2,(DWORD_PTR)HistoryName,DIF_FOCUS|DIF_HISTORY,L"",
-		DI_TEXT,0,3,0,3,0,DIF_SEPARATOR,L"",
-		DI_BUTTON,0,4,0,4,0,DIF_DEFAULT|DIF_CENTERGROUP,MSG(MOk),
-		DI_BUTTON,0,4,0,4,0,DIF_CENTERGROUP,MSG(MSelectFilter),
-		DI_BUTTON,0,4,0,4,0,DIF_CENTERGROUP,MSG(MCancel),
+		{DI_DOUBLEBOX,3,1,51,5,{},0,L""},
+		{DI_EDIT,5,2,49,2,{(DWORD_PTR)HistoryName},DIF_FOCUS|DIF_HISTORY,L""},
+		{DI_TEXT,0,3,0,3,{},DIF_SEPARATOR,L""},
+		{DI_BUTTON,0,4,0,4,{},DIF_DEFAULT|DIF_CENTERGROUP,MSG(MOk)},
+		{DI_BUTTON,0,4,0,4,{},DIF_CENTERGROUP,MSG(MSelectFilter)},
+		{DI_BUTTON,0,4,0,4,{},DIF_CENTERGROUP,MSG(MCancel)}
 	};
 	MakeDialogItemsEx(SelectDlgData,SelectDlg);
 	FileFilter Filter(this,FFT_SELECT);
@@ -3802,7 +3852,7 @@ void FileList::CopyFiles()
 
 void FileList::CopyNames(bool FillPathName, bool UNC)
 {
-	OpenPluginInfo Info={0};
+	OpenPluginInfo Info{};
 	wchar_t *CopyData=nullptr;
 	long DataSize=0;
 	FARString strSelName, strQuotedName;
@@ -4084,28 +4134,28 @@ void FileList::SelectSortMode()
 {
 	MenuDataEx SortMenu[]=
 	{
-		MSG(MMenuSortByName),LIF_SELECTED,KEY_CTRLF3,
-		MSG(MMenuSortByExt),0,KEY_CTRLF4,
-		MSG(MMenuSortByWrite),0,KEY_CTRLF5,
-		MSG(MMenuSortBySize),0,KEY_CTRLF6,
-		MSG(MMenuUnsorted),0,KEY_CTRLF7,
-		MSG(MMenuSortByCreation),0,KEY_CTRLF8,
-		MSG(MMenuSortByAccess),0,KEY_CTRLF9,
-		MSG(MMenuSortByChange),0,0,
-		MSG(MMenuSortByDiz),0,KEY_CTRLF10,
-		MSG(MMenuSortByOwner),0,KEY_CTRLF11,
-		MSG(MMenuSortByCompressedSize),0,0,
-		MSG(MMenuSortByNumLinks),0,0,
-		MSG(MMenuSortByNumStreams),0,0,
-		MSG(MMenuSortByStreamsSize),0,0,
-		MSG(MMenuSortByFullName),0,0,
-		MSG(MMenuSortByCustomData),0,0,
-		L"",LIF_SEPARATOR,0,
-		MSG(MMenuSortUseNumeric),0,0,
-		MSG(MMenuSortUseCaseSensitive),0,0,
-		MSG(MMenuSortUseGroups),0,KEY_SHIFTF11,
-		MSG(MMenuSortSelectedFirst),0,KEY_SHIFTF12,
-		MSG(MMenuSortDirectoriesFirst),0,0,
+		{MSG(MMenuSortByName),LIF_SELECTED,KEY_CTRLF3},
+		{MSG(MMenuSortByExt),0,KEY_CTRLF4},
+		{MSG(MMenuSortByWrite),0,KEY_CTRLF5},
+		{MSG(MMenuSortBySize),0,KEY_CTRLF6},
+		{MSG(MMenuUnsorted),0,KEY_CTRLF7},
+		{MSG(MMenuSortByCreation),0,KEY_CTRLF8},
+		{MSG(MMenuSortByAccess),0,KEY_CTRLF9},
+		{MSG(MMenuSortByChange),0,0},
+		{MSG(MMenuSortByDiz),0,KEY_CTRLF10},
+		{MSG(MMenuSortByOwner),0,KEY_CTRLF11},
+		{MSG(MMenuSortByCompressedSize),0,0},
+		{MSG(MMenuSortByNumLinks),0,0},
+		{MSG(MMenuSortByNumStreams),0,0},
+		{MSG(MMenuSortByStreamsSize),0,0},
+		{MSG(MMenuSortByFullName),0,0},
+		{MSG(MMenuSortByCustomData),0,0},
+		{L"",LIF_SEPARATOR,0},
+		{MSG(MMenuSortUseNumeric),0,0},
+		{MSG(MMenuSortUseCaseSensitive),0,0},
+		{MSG(MMenuSortUseGroups),0,KEY_SHIFTF11},
+		{MSG(MMenuSortSelectedFirst),0,KEY_SHIFTF12},
+		{MSG(MMenuSortDirectoriesFirst),0,0}
 	};
 	static int SortModes[]=
 	{

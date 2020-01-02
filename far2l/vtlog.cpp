@@ -6,6 +6,10 @@
 #include <deque>
 #include <fcntl.h>
 
+#if !defined(__APPLE__) && !defined(__FreeBSD__)
+# include <alloca.h>
+#endif
+
 #include "vtlog.h"
 
 
@@ -108,7 +112,8 @@ namespace VTLog
 
 		
 	} g_lines;
-	
+
+	static unsigned int g_pause_cnt = 0;
 	
 	static unsigned int ActualLineWidth(unsigned int Width, const CHAR_INFO *Chars)
 	{
@@ -123,10 +128,22 @@ namespace VTLog
 		}		
 	}
 	
-	void  OnConsoleScroll(PVOID pContext, unsigned int Top, unsigned int Width, CHAR_INFO *Chars)
+	void  OnConsoleScroll(PVOID pContext, unsigned int Width, CHAR_INFO *Chars)
 	{
-		if (Top==0) {
+		if (g_pause_cnt == 0) {
 			g_lines.Add( ActualLineWidth(Width, Chars), Chars);
+		}
+	}
+
+	void Pause()
+	{
+		__sync_add_and_fetch(&g_pause_cnt, 1);
+	}
+
+	void Resume()
+	{
+		if (__sync_sub_and_fetch(&g_pause_cnt, 1) < 0) {
+			abort();
 		}
 	}
 	

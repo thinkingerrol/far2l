@@ -1,7 +1,40 @@
 #include <plugin.hpp>
+#include <utils.h>
 #include "Editor.h"
 
-Editor::Editor(int id, PluginStartupInfo &info, FarStandardFunctions &fsf) : id(id), info(info), fsf(fsf) {}
+Editor::Editor(int id, PluginStartupInfo &info, FarStandardFunctions &fsf, const std::wstring &autoEnableMasks)
+        : id(id), info(info), fsf(fsf) {
+
+    if (!autoEnableMasks.empty()) {
+        std::wstring fileName;
+        size_t fileNameSize = info.EditorControl(ECTL_GETFILENAME, NULL);
+
+        if (fileNameSize > 1) {
+            fileName.resize(fileNameSize + 1);
+            info.EditorControl(ECTL_GETFILENAME, &fileName[0]);
+            fileName.resize(fileNameSize - 1);
+
+        } else
+            fileName.clear();
+
+        for (std::wstring tmp = autoEnableMasks;;) {
+            size_t i = tmp.rfind(';');
+            if (i == std::wstring::npos) {
+                i = 0;
+            } else
+                ++i;
+
+            if (i < tmp.size() && MatchWildcardICE(fileName.c_str(), tmp.c_str() + i)) {
+                isEnabled = true;
+                break;
+            }
+            if (i <= 1)
+                break;
+
+            tmp.resize(i - 1);
+        }
+    }
+}
 
 int Editor::getId() {
     return this->id;
@@ -11,6 +44,19 @@ EditorInfo Editor::getInfo() {
     EditorInfo ei = {0};
     info.EditorControl(ECTL_GETINFO, &ei);
     return ei;
+}
+
+bool Editor::getEnabled()
+{
+	return isEnabled;
+}
+
+void Editor::setEnabled(bool enabled)
+{
+    if (!enabled && isEnabled)
+        declineSuggestion();
+
+    isEnabled = enabled;
 }
 
 EditorGetString Editor::getString(int line) {

@@ -409,6 +409,8 @@ namespace oldfar
 		FDLG_NODRAWSHADOW        = 0x00000004,
 		FDLG_NODRAWPANEL         = 0x00000008,
 		FDLG_NONMODAL            = 0x00000010,
+		FDLG_KEEPCONSOLETITLE    = 0x00000020,
+		FDLG_REGULARIDLE         = 0x00000040 // causes dialog to receive DN_ENTERIDLE at least once per second
 	};
 
 	typedef LONG_PTR(WINAPI *FARWINDOWPROC)(
@@ -548,6 +550,7 @@ namespace oldfar
 		DWORD                NumberOfLinks;
 		char                *Description;
 		char                *Owner;
+		char                *Group;
 		char               **CustomColumnData;
 		int                  CustomColumnNumber;
 		DWORD_PTR            UserData;
@@ -1543,11 +1546,16 @@ namespace oldfar
 	{
 		EF_HIDEOUT = 0x01,
 		EF_NOWAIT = 0x02,
-		EF_SUDO = 0x04
+		EF_SUDO = 0x04,
+		EF_NOTIFY = 0x08,
+		EF_NOCMDPRINT = 0x10
+
 	};
 
         typedef int (WINAPI *FAREXECUTE)(const char *CmdStr, unsigned int ExecFlags);
 	typedef int (WINAPI *FAREXECUTE_LIBRARY)(const char *Library, const char *Symbol, const char *CmdStr, unsigned int ExecFlags);
+	typedef void (WINAPI *FARDISPLAYNOTIFICATION)(const char *action, const char *object);
+	typedef int (WINAPI *FARDISPATCHNTRTHRDCALLS)();
 
 	typedef struct FarStandardFunctions
 	{
@@ -1599,6 +1607,8 @@ namespace oldfar
 		FARGETREPARSEPOINTINFO     GetReparsePointInfo;
 		FAREXECUTE                 Execute;
 		FAREXECUTE_LIBRARY         ExecuteLibrary;
+		FARDISPLAYNOTIFICATION     DisplayNotification;
+		FARDISPATCHNTRTHRDCALLS    DispatchInterThreadCalls;
 	} FARSTANDARDFUNCTIONS;
 
 	struct PluginStartupInfo

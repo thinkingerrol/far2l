@@ -96,6 +96,7 @@ struct FileListItem
 		DizText = nullptr;
 		DeleteDiz = 0;
 		strOwner.Clear();
+		strGroup.Clear();
 		CustomColumnData = nullptr;
 		CustomColumnNumber = 0;
 		CRC32 = 0;
@@ -130,6 +131,7 @@ struct FileListItem
 			DizText = fliCopy.DizText;
 			DeleteDiz = fliCopy.DeleteDiz;
 			strOwner = fliCopy.strOwner;
+			strGroup = fliCopy.strGroup;
 			CustomColumnData = fliCopy.CustomColumnData;
 			CustomColumnNumber = fliCopy.CustomColumnNumber;
 			CRC32 = fliCopy.CRC32;
@@ -143,6 +145,7 @@ struct FileListItem
 			PackSize = fliCopy.PackSize;
 			StreamsSize = fliCopy.StreamsSize;
 			strName = fliCopy.strName;
+			ReparseTag = fliCopy.ReparseTag;
 			strCustomData = fliCopy.strCustomData;
 		}
 
@@ -155,6 +158,7 @@ struct PluginsListItem
 	HANDLE hPlugin;
 	FARString strHostFile;
 	FARString strPrevOriginalCurDir;
+	std::map<FARString, FARString> Dir2CursorFile;
 	int Modified;
 	int PrevViewMode;
 	int PrevSortMode;
@@ -222,7 +226,7 @@ class FileList:public Panel
 
 	private:
 		virtual void SetSelectedFirstMode(int Mode);
-		virtual int GetSelectedFirstMode() {return SelectedFirst;};
+		virtual int GetSelectedFirstMode() {return SelectedFirst;}
 		virtual void DisplayObject();
 		void DeleteListData(FileListItem **(&ListData),int &FileCount);
 		void Up(int Count);
@@ -370,7 +374,7 @@ class FileList:public Panel
 		virtual int IsFullScreen();
 		virtual int IsDizDisplayed();
 		virtual int IsColumnDisplayed(int Type);
-		virtual int GetColumnsCount() { return Columns;};
+		virtual int GetColumnsCount() { return Columns;}
 		virtual void SetReturnCurrentFile(int Mode);
 		virtual void GetOpenPluginInfo(OpenPluginInfo *Info);
 		virtual void SetPluginMode(HANDLE hPlugin,const wchar_t *PluginFile,bool SendOnFocus=false);

@@ -64,9 +64,13 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "console.hpp"
 #include "constitle.hpp"
 #include "vtshell.h"
+#include "InterThreadCall.hpp"
 #include <wordexp.h>
 #include <set>
 #include <sys/wait.h>
+#ifdef __FreeBSD__
+# include <signal.h>
+#endif
 
 static WCHAR eol[2] = {'\r', '\n'};
 
@@ -149,6 +153,13 @@ public:
 	bool IsBackground() const {return _backround; }
 };
 
+
+bool IsExecutableFilePath(const char *path)
+{
+	ExecClassifier ec(path);
+	return ec.IsExecutable();
+}
+
 static void CallExec(const char *CmdStr) 
 {
 	int r = execl("/bin/sh", "sh", "-c", CmdStr, NULL);
@@ -159,15 +170,16 @@ static void CallExec(const char *CmdStr)
 
 static int NotVTExecute(const char *CmdStr, bool NoWait, bool NeedSudo)
 {
-	int r = -1;
+	int r = -1, fdr = -1, fdw = -1;
 	if (NeedSudo) {
 		return sudo_client_execute(CmdStr, false, NoWait);
 	}
-	int fdr = open(DEVNULL, O_RDONLY);
-	if (fdr==-1) perror("stdin error opening " DEVNULL);
+// DEBUG
+//	fdr = open(DEVNULL, O_RDONLY);
+//	if (fdr==-1) perror("stdin error opening " DEVNULL);
 	
 	//let debug out go to console
-	int fdw = open(DEVNULL, O_WRONLY);
+//	fdw = open(DEVNULL, O_WRONLY);
 	//if (fdw==-1) perror("open stdout error");
 	int pid = fork();
 	if (pid==0) {
@@ -204,24 +216,30 @@ static int NotVTExecute(const char *CmdStr, bool NoWait, bool NeedSudo)
 	return r;
 }
 
-int WINAPI farExecuteA(const char *CmdStr, unsigned int ExecFlags)
+static int farExecuteASynched(const char *CmdStr, unsigned int ExecFlags)
 {
 //	fprintf(stderr, "TODO: Execute('" WS_FMT "')\n", CmdStr);
 	int r;
 	if (ExecFlags & EF_HIDEOUT) {
 		r = NotVTExecute(CmdStr, (ExecFlags & EF_NOWAIT) != 0, (ExecFlags & EF_SUDO) != 0);
+//		CtrlObject->CmdLine->SetString(L"", TRUE);//otherwise command remain in cmdline
+
 	} else {
 		ProcessShowClock++;
-		CtrlObject->CmdLine->ShowBackground();
-		CtrlObject->CmdLine->Redraw();
-		CtrlObject->CmdLine->SetString(L"", TRUE);
+		if (CtrlObject && CtrlObject->CmdLine) {
+			CtrlObject->CmdLine->ShowBackground();
+			CtrlObject->CmdLine->Redraw();
+		}
+//		CtrlObject->CmdLine->SetString(L"", TRUE);
 		ScrBuf.Flush();
 		DWORD saved_mode = 0, dw;
 		WINPORT(GetConsoleMode)(NULL, &saved_mode);
 		WINPORT(SetConsoleMode)(NULL, saved_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT
 			| ENABLE_EXTENDED_FLAGS | ENABLE_MOUSE_INPUT | ENABLE_INSERT_MODE | WINDOW_BUFFER_SIZE_EVENT);//ENABLE_QUICK_EDIT_MODE
-		const std::wstring &ws = MB2Wide(CmdStr);
-		WINPORT(WriteConsole)( NULL, ws.c_str(), ws.size(), &dw, NULL );
+		if ((ExecFlags & EF_NOCMDPRINT) == 0) {
+			const std::wstring &ws = MB2Wide(CmdStr);
+			WINPORT(WriteConsole)( NULL, ws.c_str(), ws.size(), &dw, NULL );
+		}
 		WINPORT(WriteConsole)( NULL, &eol[0], ARRAYSIZE(eol), &dw, NULL );
 		if (ExecFlags & (EF_NOWAIT|EF_HIDEOUT) ) {
 			r = NotVTExecute(CmdStr, (ExecFlags & EF_NOWAIT) != 0, (ExecFlags & EF_SUDO) != 0);
@@ -229,21 +247,31 @@ int WINAPI farExecuteA(const char *CmdStr, unsigned int ExecFlags)
 			r = VTShell_Execute(CmdStr, (ExecFlags & EF_SUDO) != 0);
 		}
 		if ((ExecFlags & EF_NOTIFY) && Opt.NotifOpt.OnConsole) {
-			DisplayNotification(MSG(MConsoleCommandComplete), CmdStr);
+			DisplayNotification( (r == 0) ? MSG(MConsoleCommandComplete) : MSG(MConsoleCommandFailed), CmdStr);
 		}
 		WINPORT(SetConsoleMode)( NULL, saved_mode | 
 			ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT );
 		WINPORT(WriteConsole)( NULL, &eol[0], ARRAYSIZE(eol), &dw, NULL );
 		WINPORT(SetConsoleMode)(NULL, saved_mode);
 		ScrBuf.FillBuf();
-		CtrlObject->CmdLine->SaveBackground();
+		if (CtrlObject && CtrlObject->CmdLine) {
+			CtrlObject->CmdLine->SaveBackground();
+		}
 		ProcessShowClock--;
 		SetFarConsoleMode(TRUE);
 		ScrBuf.Flush();
+		if (CtrlObject && CtrlObject->MainKeyBar && Opt.ShowKeyBar) {
+			CtrlObject->MainKeyBar->Show();
+		}
 	}
 	fprintf(stderr, "farExecuteA:('%s', 0x%x): r=%d\n", CmdStr, ExecFlags, r);
 	
 	return r;
+}
+
+int WINAPI farExecuteA(const char *CmdStr, unsigned int ExecFlags)
+{
+	return InterThreadCall<int, -1>(std::bind(farExecuteASynched, CmdStr, ExecFlags));
 }
 
 int WINAPI farExecuteLibraryA(const char *Library, const char *Symbol, const char *CmdStr, unsigned int ExecFlags)
@@ -291,10 +319,10 @@ static int ExecuteA(const char *CmdStr, bool AlwaysWaitFinish, bool SeparateWind
 
 	if (!tmp.empty()) {
 		flags|= EF_NOWAIT | EF_HIDEOUT; //open.sh doesnt print anything
-		CtrlObject->CmdLine->SetString(L"", TRUE);//otherwise command remain in cmdline
 	}
-	if ( (ec.IsFile() || ec.IsDir()) && ec.cmd()[0] != '/' && (ec.cmd()[0] != '.' || ec.cmd()[0] != '/'))
+	if ( (ec.IsFile() || ec.IsDir()) && ec.cmd()[0] != '/' && !StrStartsFrom(ec.cmd(), "./")) {
 		tmp+= "./"; // it is ok to prefix ./ even to a quoted string
+	}
 	tmp+= CmdStr;
 
 	r = farExecuteA(tmp.c_str(), flags);
@@ -352,7 +380,25 @@ int CommandLine::CmdExecute(const wchar_t *CmdLine, bool AlwaysWaitFinish, bool 
 		
 		r = -1; 
 	} else {
+		CtrlObject->CmdLine->SetString(L"", TRUE);
+		char cd_prev[MAX_PATH + 1] = {'.', 0};
+		if (!sdc_getcwd(cd_prev, MAX_PATH)) {
+			cd_prev[0] = 0;
+		}
+
 		r = Execute(CmdLine, AlwaysWaitFinish, SeparateWindow, DirectRun, false , WaitForIdle , Silent , RunAs);
+
+		char cd[MAX_PATH + 1] = {'.', 0};
+		if (sdc_getcwd(cd, MAX_PATH)) {
+			if (strcmp(cd_prev, cd) != 0) {
+				if (!IntChDir(MB2Wide(cd).c_str(), true, false)) {
+					perror("IntChDir");
+				}
+			}
+		} else {
+			perror("sdc_getcwd");
+		}
+
 	}
 
 	if (!Flags.Check(FCMDOBJ_LOCKUPDATEPANEL)) {
@@ -374,3 +420,33 @@ bool ProcessOSAliases(FARString &strStr)
 {
 	return false;
 }
+
+bool POpen(std::vector<std::wstring> &result, const char *command)
+{
+	FILE *f = popen(command, "r");
+	if (!f) {
+		perror("POpen: popen");
+		return false;
+	}
+
+	char buf[0x400] = { };
+	while (fgets(buf, sizeof(buf)-1, f)) {
+		size_t l = strlen(buf);
+		while (l && (buf[l-1]=='\r' || buf[l-1]=='\n')) --l;
+		if (l) {
+			buf[l] = 0;
+			std::wstring line = MB2Wide(buf);
+			while (line.size() > 40) {
+				size_t p = line.find(L',' , 30);
+				if (p==std::string::npos) break;
+				result.emplace_back( line.substr(0, p) );
+				line.erase(0, p + 1);
+			}
+
+			if (!line.empty()) result.push_back( line );
+		}
+	}
+	pclose(f);
+	return true;
+}
+
